@@ -10,7 +10,8 @@
 
 - **纯 JVM Kotlin**：全部模块零 Android 依赖，Android 工程与任何 JVM 应用（服务端、桌面）均可直接依赖。
 - **基础能力完善**：聚焦框架级底座 —— Agent 引擎、工具系统、LLM 适配、MCP 协议、插件 SDK。
-- **克制**：不含原项目中的终端仿真、设备工具集、认知记忆等业务高级功能；连接器体系不复用，插件与 MCP 全新重做。
+- **终端执行能力**（PR #4，自 [yl-ai](https://github.com/iill392/yl-ai) 移植重写）：共享终端会话、哨兵执行、风险分级与审批闸门、后台作业、Alpine 容器、本地控制 API、审计。
+- **克制**：不含原项目中的设备工具集、认知记忆等业务高级功能；连接器体系不复用，插件与 MCP 全新重做。
 
 ## 模块总览
 
@@ -21,7 +22,10 @@
 | `agent-llm` | LLM 适配层：OpenAI 兼容流式客户端（SSE + 工具调用累积）、消息模型、端点差异适配 | — |
 | `agent-mcp` | **全新重做**的 MCP 协议：JSON-RPC 2.0、stdio / Streamable HTTP 双传输、客户端 + 服务端 + 工具桥 | [MCP_GUIDE.md](docs/MCP_GUIDE.md) |
 | `agent-plugin` | **全新重做**的插件 SDK：ServiceLoader 发现、三道信任门、宿主能力桥 | [PLUGIN_SDK.md](docs/PLUGIN_SDK.md) |
+| `agent-shell` | **全新移植**的终端引擎：共享终端会话、哨兵式命令执行、命令风险分级、挂起式审批闸门、后台作业、Alpine 容器（PRoot）、本地控制 API、审计与崩溃恢复 | [SHELL_GUIDE.md](docs/SHELL_GUIDE.md) |
+| `agent-shell-tools` | **全新移植**的终端工具集：19 个正交 AgentTool、审批/审计钩子、系统提示词构建器、平台能力 SPI | [SHELL_GUIDE.md](docs/SHELL_GUIDE.md) |
 | `examples/simple-agent` | 最小可运行示例：控制台对话 Agent（含插件演示） | [GETTING_STARTED.md](docs/GETTING_STARTED.md) |
+| `examples/terminal-agent` | 终端 Agent 示例：ShellToolSet 全套接入 + 控制台审批 | [SHELL_GUIDE.md](docs/SHELL_GUIDE.md) |
 
 ## 快速上手
 
@@ -100,6 +104,7 @@ export AGENT_MODEL="deepseek-chat"
 - [x] **PR #1** — 核心框架（agent-core / agent-tools / agent-llm）
 - [x] **PR #2** — MCP 上下文协议重做（agent-mcp）
 - [x] **PR #3** — 插件系统重做 + 示例 + 发布工作流（agent-plugin / examples / release）
+- [x] **PR #4** — 终端能力整体移植：agent-shell / agent-shell-tools（自 yl-ai 移植重写，修复哨兵协议缺陷）
 
 ## License
 
