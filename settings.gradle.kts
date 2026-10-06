@@ -21,3 +21,4 @@ rootProject.name = "android-agent-framework"
 include(":agent-core")
 include(":agent-tools")
 include(":agent-llm")
+include(":agent-mcp")
