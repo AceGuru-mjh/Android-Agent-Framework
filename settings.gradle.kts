@@ -18,3 +18,6 @@ rootProject.name = "android-agent-framework"
 //   PR1 → :agent-core / :agent-tools / :agent-llm
 //   PR2 → :agent-mcp
 //   PR3 → :agent-plugin / :examples:simple-agent
+include(":agent-core")
+include(":agent-tools")
+include(":agent-llm")
