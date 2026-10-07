@@ -1,6 +1,7 @@
 # Android Agent Framework
 
 [![CI](https://github.com/AceGuru-mjh/Android-Agent-Framework/actions/workflows/ci.yml/badge.svg)](https://github.com/AceGuru-mjh/Android-Agent-Framework/actions/workflows/ci.yml)
+[![PR Check](https://github.com/AceGuru-mjh/Android-Agent-Framework/actions/workflows/pr-check.yml/badge.svg)](https://github.com/AceGuru-mjh/Android-Agent-Framework/actions/workflows/pr-check.yml)
 [![Release](https://github.com/AceGuru-mjh/Android-Agent-Framework/actions/workflows/release.yml/badge.svg)](https://github.com/AceGuru-mjh/Android-Agent-Framework/actions/workflows/release.yml)
 
 > 从 [Android-Guru-Agent](https://github.com/AceGuru-mjh/Android-Guru-Agent) 中提取的通用 Agent 框架。
@@ -10,7 +11,8 @@
 
 - **纯 JVM Kotlin**：全部模块零 Android 依赖，Android 工程与任何 JVM 应用（服务端、桌面）均可直接依赖。
 - **基础能力完善**：聚焦框架级底座 —— Agent 引擎、工具系统、LLM 适配、MCP 协议、插件 SDK。
-- **终端执行能力**（PR #4，自 [yl-ai](https://github.com/iill392/yl-ai) 移植重写）：共享终端会话、哨兵执行、风险分级与审批闸门、后台作业、Alpine 容器、本地控制 API、审计。
+- **终端执行能力**（PR #4，自 [yl-ai](https://github.com/iill392/yl-ai) 移植重写）：共享终端会话、哨兵执行、风险分级与审批闸门、后台作业、Alpine 容器（PRoot）、本地控制 API、审计。
+- **C++17 原生增强层**（PR #5）：forkpty 真 PTY 通道、ANSI 批量清洗、ELF64 补丁 —— 不可用时优雅回退纯 JVM，框架主体仍零平台依赖。
 - **克制**：不含原项目中的设备工具集、认知记忆等业务高级功能；连接器体系不复用，插件与 MCP 全新重做。
 
 ## 模块总览
@@ -24,8 +26,9 @@
 | `agent-plugin` | **全新重做**的插件 SDK：ServiceLoader 发现、三道信任门、宿主能力桥 | [PLUGIN_SDK.md](docs/PLUGIN_SDK.md) |
 | `agent-shell` | **全新移植**的终端引擎：共享终端会话、哨兵式命令执行、命令风险分级、挂起式审批闸门、后台作业、Alpine 容器（PRoot）、本地控制 API、审计与崩溃恢复 | [SHELL_GUIDE.md](docs/SHELL_GUIDE.md) |
 | `agent-shell-tools` | **全新移植**的终端工具集：19 个正交 AgentTool、审批/审计钩子、系统提示词构建器、平台能力 SPI | [SHELL_GUIDE.md](docs/SHELL_GUIDE.md) |
+| `agent-shell-native` | **C++17 原生增强层**（PR #5）：forkpty 真 PTY 通道（NativeProcessChannelFactory）、ANSI 批量清洗、ELF64 补丁（RUNPATH/SONAME），不可用时优雅回退纯 JVM | [NATIVE_GUIDE.md](docs/NATIVE_GUIDE.md) |
 | `examples/simple-agent` | 最小可运行示例：控制台对话 Agent（含插件演示） | [GETTING_STARTED.md](docs/GETTING_STARTED.md) |
-| `examples/terminal-agent` | 终端 Agent 示例：ShellToolSet 全套接入 + 控制台审批 | [SHELL_GUIDE.md](docs/SHELL_GUIDE.md) |
+| `examples/terminal-agent` | 终端 Agent 示例：ShellToolSet 全套接入 + 原生 PTY 自动探测 + 控制台审批 | [SHELL_GUIDE.md](docs/SHELL_GUIDE.md) |
 
 ## 快速上手
 
@@ -96,7 +99,15 @@ export AGENT_MODEL="deepseek-chat"
 ./gradlew build        # 编译 + 全部测试（JDK 17+，无需 Android SDK）
 ./gradlew test         # 仅测试
 ./gradlew :examples:simple-agent:run   # 运行示例
+
+# C++ 原生层（可选，需要 cmake + C++17 编译器）
+cmake -S agent-shell-native/src/main/cpp -B build-native && cmake --build build-native
+ctest --test-dir build-native    # C++ 单元测试
+./gradlew :agent-shell-native:test -Pagsh.native.lib=$PWD/build-native/libagsh_native.so
 ```
+
+Android arm64-v8a 交叉编译（NDK）：见 [NATIVE_GUIDE.md](docs/NATIVE_GUIDE.md)；
+CI 产出的成品库在 Actions → Artifacts 下载。
 
 ## 路线图
 
@@ -105,6 +116,7 @@ export AGENT_MODEL="deepseek-chat"
 - [x] **PR #2** — MCP 上下文协议重做（agent-mcp）
 - [x] **PR #3** — 插件系统重做 + 示例 + 发布工作流（agent-plugin / examples / release）
 - [x] **PR #4** — 终端能力整体移植：agent-shell / agent-shell-tools（自 yl-ai 移植重写，修复哨兵协议缺陷）
+- [x] **PR #5** — C++17 原生增强层（agent-shell-native）+ PRoot RUNPATH 自动清空 + CI 全面编译验证（JVM 矩阵 / C++ host / NDK 交叉编译）+ PR 门禁（pr-check.yml）
 
 ## License
 

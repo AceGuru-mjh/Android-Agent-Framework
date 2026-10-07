@@ -19,6 +19,7 @@ rootProject.name = "android-agent-framework"
 //   PR2 → :agent-mcp
 //   PR3 → :agent-plugin / :examples:simple-agent
 //   PR4 → :agent-shell / :agent-shell-tools / :examples:terminal-agent
+//   PR5 → :agent-shell-native（C++17 原生增强层：forkpty PTY / ANSI 清洗 / ELF64 补丁）
 include(":agent-core")
 include(":agent-tools")
 include(":agent-llm")
@@ -26,5 +27,6 @@ include(":agent-mcp")
 include(":agent-plugin")
 include(":agent-shell")
 include(":agent-shell-tools")
+include(":agent-shell-native")
 include(":examples:simple-agent")
 include(":examples:terminal-agent")

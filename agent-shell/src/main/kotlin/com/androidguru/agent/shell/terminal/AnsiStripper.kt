@@ -60,9 +60,15 @@ object AnsiStripper {
             if (idx >= 0) line.substring(idx + 1) else line
         }
 
-    /** 完整清洗：去转义 → 折叠覆盖 → 折叠 3+ 连续换行 → 去尾部空白。 */
+    /**
+     * 完整清洗：折叠覆盖 → 去转义 → 折叠 3+ 连续换行 → 去尾部空白。
+     *
+     * 顺序说明（PR5 修正）：必须**先**折叠 `\r` 覆盖再剥离 —— [strip] 会删除
+     * 全部 `\r`，若顺序颠倒（yl-ai / 早期移植版的 `collapse(strip(x))`），
+     * 折叠步骤将永远空转，进度条碎片（`10%50%100%`）会全部混进正文。
+     */
     fun clean(input: String): String =
-        collapseCarriageReturns(strip(input))
+        strip(collapseCarriageReturns(input))
             .replace(Regex("\n{3,}"), "\n\n")
             .trimEnd()
 

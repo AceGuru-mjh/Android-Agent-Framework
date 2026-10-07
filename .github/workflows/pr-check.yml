@@ -1,20 +1,67 @@
-name: CI
+name: PR Check
 
-# 主线验证（push main）：JVM 构建矩阵 + C++ 原生层（host 编译测试 + Android NDK 交叉编译）。
-# PR 的门禁检查见 pr-check.yml（同一套 job + PR 元数据校验 + 聚合门禁）。
+# PR 门禁（pull_request → main）：PR 元数据校验 + JVM 构建矩阵（JDK 17/21）
+# + C++ 原生层验证（host 编译/测试/JNI 集成 + Android NDK 交叉编译）
+# + 聚合门禁 pr-gate（branch protection 应把它设为 required check）。
+#
+# 与 ci.yml 的关系：ci.yml 只负责 push main 的主线验证；
+# PR 的全部检查在本 workflow（避免同一 PR 双跑浪费）。
 on:
-  push:
+  pull_request:
     branches: [ main ]
+    types: [ opened, synchronize, reopened, ready_for_review ]
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: pr-check-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
+  pr-metadata:
+    name: PR Metadata
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate PR title
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          echo "PR 标题: $TITLE"
+          # 非空检查
+          if [ -z "${TITLE// /}" ]; then
+            echo "::error title=标题为空::PR 必须有标题"
+            exit 1
+          fi
+          # 长度检查（过长的标题会在列表/通知中被截断）
+          LEN=${#TITLE}
+          if [ "$LEN" -gt 100 ]; then
+            echo "::error title=标题过长::当前 $LEN 字符，上限 100"
+            exit 1
+          fi
+          echo "标题长度 $LEN ✅"
+
+      - name: Merge conflict check
+        if: ${{ github.event.pull_request.mergeable == false }}
+        run: |
+          echo "::error title=存在合并冲突::请先 rebase / merge main 分支"
+          exit 1
+
+      - name: Diff stats (informational)
+        run: |
+          git fetch origin main
+          echo "### 变更统计"
+          git diff --stat origin/main...HEAD | tail -3
+          echo ""
+          echo "### 变更文件数: $(git diff --name-only origin/main...HEAD | wc -l)"
+
   build:
     name: Build & Test (JDK ${{ matrix.java }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         java: [ 17, 21 ]
     steps:
@@ -30,7 +77,7 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+          cache-read-only: true
 
       - name: Build
         run: ./gradlew build --stacktrace
@@ -39,7 +86,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: test-reports-jdk${{ matrix.java }}
+          name: pr-test-reports-jdk${{ matrix.java }}
           path: '**/build/reports/tests/'
           retention-days: 7
 
@@ -50,7 +97,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # host 构建需要 JDK 的 jni.h（CMake find_package(JNI)）
       - name: Setup JDK 17
         uses: actions/setup-java@v4
         with:
@@ -71,8 +117,7 @@ jobs:
         with:
           cache-read-only: true
 
-      # JVM 集成测试：加载 host 构建的 libagsh_native.so
-      #（strict=true —— 库加载失败直接红，防止"静默全跳过"假绿）
+      # JVM 集成测试：加载 host 构建的 libagsh_native.so（strict 模式防假绿）
       - name: JVM integration tests (native strict)
         run: >-
           ./gradlew :agent-shell-native:test
@@ -83,9 +128,9 @@ jobs:
       - name: Upload native library (host)
         uses: actions/upload-artifact@v4
         with:
-          name: libagsh_native-linux-x64
+          name: pr-libagsh_native-linux-x64
           path: build-native/libagsh_native.so
-          retention-days: 14
+          retention-days: 7
 
   native-android:
     name: Native Android (NDK arm64-v8a)
@@ -129,6 +174,36 @@ jobs:
       - name: Upload native library (android arm64-v8a)
         uses: actions/upload-artifact@v4
         with:
-          name: libagsh_native-android-arm64-v8a
+          name: pr-libagsh_native-android-arm64-v8a
           path: build-android/libagsh_native.so
-          retention-days: 14
+          retention-days: 7
+
+  # ------------------------------------------------------------------
+  # 聚合门禁：把全部检查汇聚为单一 required check。
+  # branch protection 里把 "PR Check Gate" 设为必需即可一票管全部。
+  # ------------------------------------------------------------------
+  pr-gate:
+    name: PR Check Gate
+    runs-on: ubuntu-latest
+    needs: [ pr-metadata, build, native-host, native-android ]
+    if: always()
+    steps:
+      - name: Summarize
+        run: |
+          echo "### PR Check 汇总"
+          echo "| 检查 | 结果 |"
+          echo "| --- | --- |"
+          echo "| PR Metadata | ${{ needs.pr-metadata.result }} |"
+          echo "| Build & Test (JDK 17) | ${{ needs.build.result }} |"
+          echo "| Build & Test (JDK 21) | ${{ needs.build.result }} |"
+          echo "| Native Host (C++ + JNI) | ${{ needs.native-host.result }} |"
+          echo "| Native Android (NDK arm64) | ${{ needs.native-android.result }} |"
+
+      - name: Gate
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}
+        run: |
+          echo "::error::PR 检查未全部通过（存在 failure/cancelled/skipped）"
+          exit 1
+
+      - name: All green
+        run: echo "全部检查通过 ✅"

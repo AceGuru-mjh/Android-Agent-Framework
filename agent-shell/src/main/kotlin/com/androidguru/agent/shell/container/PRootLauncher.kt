@@ -51,8 +51,16 @@ class PRootLauncher(
         }
         val runpath = ElfRunpathPatcher.readRunpath(proot)
         if (!runpath.isNullOrEmpty()) {
-            // RUNPATH 会覆盖 LD_LIBRARY_PATH（yl-ai 坑 21）；宿主可提前用 ElfRunpathPatcher.clear 处理
-            audit.recordSetting("proot.runpath_warning", "RUNPATH=$runpath")
+            // RUNPATH 会覆盖 LD_LIBRARY_PATH（yl-ai 坑 21）—— 必须清空才能让
+            // 宿主布置的 LD_LIBRARY_PATH 重新生效。
+            // 增强（PR5）：运行期自动原位清空（tag → DT_DEBUG + 字符串清零，
+            // 文件长度不变）；仅当清空失败时才降级为警告。
+            val cleared = runCatching { ElfRunpathPatcher.clear(proot) }.getOrDefault(false)
+            if (cleared) {
+                audit.recordSetting("proot.runpath_cleared", "was=$runpath")
+            } else {
+                audit.recordSetting("proot.runpath_warning", "RUNPATH=$runpath（自动清空失败，请检查文件可写性）")
+            }
         }
         return Readiness(true, "容器运行环境就绪", proot.absolutePath, loader.absolutePath)
     }

@@ -38,6 +38,15 @@ class AnsiStripperTest {
     }
 
     @Test
+    fun `clean 组合语义 - 先折叠覆盖再剥离`() {
+        // PR5 回归：早期版本 collapse 在 strip 之后执行（\r 已被删），
+        // 覆盖折叠从未生效 —— 进度条碎片会全部混进正文。
+        assertEquals("100%\ndone", AnsiStripper.clean("10%\r50%\r100%\ndone"))
+        assertEquals("100%", AnsiStripper.clean("10%\r50%\r100%"))
+        assertEquals("a\n\nb", AnsiStripper.clean("a\n\n\n\nb\n\n\n"))
+    }
+
+    @Test
     fun `clean 折叠三连换行并去尾部空白`() {
         assertEquals("a\n\nb", AnsiStripper.clean("a\n\n\n\nb\n\n\n"))
     }

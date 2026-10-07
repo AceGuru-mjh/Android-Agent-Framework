@@ -20,6 +20,7 @@ dependencies {
     implementation(project(":agent-llm"))
     implementation(project(":agent-shell"))
     implementation(project(":agent-shell-tools"))
+    implementation(project(":agent-shell-native"))
     implementation(libs.coroutines.core)
     implementation(libs.serialization.json)
 }

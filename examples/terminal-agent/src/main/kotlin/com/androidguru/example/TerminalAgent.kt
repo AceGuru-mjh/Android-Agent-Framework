@@ -33,13 +33,31 @@ import java.io.File
  * ./gradlew :examples:terminal-agent:run
  * ```
  *
+ * 原生层（agent-shell-native）：启动时探测 agsh_native，可用则把进程通道
+ * 升级为真 PTY（交互式程序 / Ctrl-C / 窗口尺寸全语义），不可用则回退
+ * JVM 管道 —— 桌面加载方式：
+ * ```
+ * ./gradlew :examples:terminal-agent:run \
+ *   -Djava.library.path=/path/to/dir-with-libagsh_native.so
+ * ```
+ *
  * 安全行为：写文件 / 删文件 / 非只读命令会在控制台请求确认 ——
  * 输入 y 允许一次，a 允许本会话同组合，其它一律拒绝（拒绝会回灌给模型让它改道）。
  */
 fun main() = runBlocking {
     // ① Shell 运行时（状态落盘在本目录下：会话检查点 / 审计 / 作业日志）
     val baseDir = File(System.getProperty("user.dir"), ".terminal-agent-data")
-    val runtime = ShellRuntime.create(baseDir)
+
+    // 原生 PTY 优先：加载 agsh_native（forkpty + C++17），失败优雅回退 JVM 管道
+    val nativeFactory = com.androidguru.agent.shell.nativeruntime.NativeProcessChannelFactory.createIfAvailable()
+    if (nativeFactory != null) {
+        println("终端通道：原生 PTY（${com.androidguru.agent.shell.nativeruntime.NativeElfTools.info()}）")
+    } else {
+        println("终端通道：JVM 管道（agsh_native 未加载；交互式程序 / Ctrl-C 语义退化，其余功能不受影响）")
+    }
+    val runtime = nativeFactory
+        ?.let { ShellRuntime.create(baseDir, channelFactory = it) }
+        ?: ShellRuntime.create(baseDir)
     runtime.sessions.create()
 
     // ② 终端工具集：19 个工具一次注册
