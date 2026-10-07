@@ -133,3 +133,5 @@ val runtime = ShellRuntime.create(baseDir, channelFactory = factory)
 本模块为**自研 C++ 代码**（Apache-2.0，随仓库 LICENSE），不链接、不包含
 PRoot 的任何代码 —— PRoot 二进制仍由宿主注入（`AGSH_PROOT*` 环境变量或
 jniLibs），进程边界清晰（GPL「聚合分发」路线，与 yl-ai 的合规策略一致）。
+
+<!-- 负面测试：验证 required checks 未完成时 merge 被拒 -->
