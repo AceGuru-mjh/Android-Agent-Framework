@@ -110,6 +110,10 @@ printf '__AGSH_<id>_END__:%s\n' "$__agsh_rc"   # ④ END 标记携带退出码
 - BLOCKED 正则对**整条命令**匹配 —— `ls -la; rm -rf /`、`true && rm -rf /`、
   `echo hi | rm -rf /` 都拦得住（测试背书）；
 - 审批记忆的 key 是「工具名 + 命令首词」；BLOCKED 级别永不产生记忆；
+- **授权跨会话存续（opt-in）**：构造 `ApprovalGate(FileApprovalDecisionStore(path))` 后
+  ALLOW_ALWAYS 落盘（JSONL + 原子写），重启 / 新会话直接生效；TTL 默认 7 天自动过期；
+  `resetSession` 只清会话内记忆（持久授权保留 —— 这正是它的用途），
+  `clearAllMemory` 一键撤销全部（含落盘）；不接 store 时行为与旧版完全一致；
 - **拒绝回灌**：DENY 不是异常，而是 `HookDecision.Block` 的 reason 进入对话 ——
   模型读到「用户拒绝…请改用其它方式」后会换道，而不是原样重试；
 - 本模块填补了框架的一个缺口：`ToolRisk.HIGH` 的 KDoc 声明「HIGH 风险工具默认需要

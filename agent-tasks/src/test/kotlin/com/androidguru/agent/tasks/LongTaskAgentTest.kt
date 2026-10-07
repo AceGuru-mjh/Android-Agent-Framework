@@ -258,6 +258,62 @@ class LongTaskAgentTest {
         assertEquals("42", events.filterIsInstance<AgentEvent.Complete>().single().summary)
     }
 
+    @Test
+    fun `extraContextProviders 与计划注入组合且单点异常隔离`() = runTest {
+        val llm = ScriptedLlm(
+            mutableListOf(
+                toolRound(
+                    ToolCall(
+                        id = "c1",
+                        name = "task_plan",
+                        arguments = """{"action":"rewrite","goal":"g","tasks":[{"title":"t"}]}""",
+                    ),
+                ),
+                textRound("done"),
+            ),
+        )
+        val agent = LongTaskAgent(
+            llmClient = llm,
+            sessionId = "e2e-ctx",
+            extraContextProviders = listOf(
+                com.androidguru.agent.core.engine.SystemContextProvider { "# 记忆\n- 用户叫小明" },
+                com.androidguru.agent.core.engine.SystemContextProvider { throw RuntimeException("记忆提供者坏了") },
+            ),
+        )
+
+        val events = agent.execute("g").toList()
+
+        // 异常注入器被 CompositeContextProvider 隔离：任务照常完成
+        assertTrue(events.filterIsInstance<AgentEvent.Complete>().isNotEmpty())
+
+        // 第 2 轮系统提示同时含计划注入与健康的额外注入器内容
+        val system2 = llm.requests[1].first.filterIsInstance<LlmMessage.System>().first()
+        assertTrue(system2.content.contains("长程任务计划"))
+        assertTrue(system2.content.contains("用户叫小明"))
+    }
+
+    @Test
+    fun `无 extraContextProviders 时保持原行为（计划注入直连）`() = runTest {
+        val llm = ScriptedLlm(
+            mutableListOf(
+                toolRound(
+                    ToolCall(
+                        id = "c1",
+                        name = "task_plan",
+                        arguments = """{"action":"rewrite","goal":"g","tasks":[{"title":"t"}]}""",
+                    ),
+                ),
+                textRound("done"),
+            ),
+        )
+        val agent = LongTaskAgent(llmClient = llm, sessionId = "e2e-plain")
+
+        agent.execute("g").toList()
+
+        val system2 = llm.requests[1].first.filterIsInstance<LlmMessage.System>().first()
+        assertTrue(system2.content.contains("长程任务计划"))
+    }
+
     /** 简单计算工具（宿主业务工具替身）。 */
     private class CalcTool : AgentTool {
         override val id = "calc"
