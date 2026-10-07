@@ -55,6 +55,17 @@ data class AgentConfig(
 
     /** ask_user 等待用户输入的超时。 */
     val askUserTimeoutMs: Long = 5 * 60_000L,
+
+    // ---- 长程任务：循环护栏 ----
+
+    /** 是否启用“相同工具 + 相同参数重复调用”检测（默认开）。 */
+    val loopDetectionEnabled: Boolean = true,
+
+    /** 同一签名在窗口内出现达到该次数时触发 [com.androidguru.agent.core.engine.AgentEvent.LoopDetected] 并向模型注入建议。 */
+    val loopDetectionThreshold: Int = 3,
+
+    /** 签名统计窗口大小（只统计最近 N 次调用）。 */
+    val loopDetectionWindow: Int = 12,
 ) {
     /** 读-改-写：保留未触及字段的局部更新。 */
     fun patch(block: (AgentConfig) -> AgentConfig): AgentConfig = block(this)

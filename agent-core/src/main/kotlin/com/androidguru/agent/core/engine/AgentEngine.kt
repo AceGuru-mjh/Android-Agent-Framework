@@ -25,6 +25,20 @@ interface AgentEngine {
      */
     suspend fun submitUserInput(answer: String): Boolean
 
+    /**
+     * 长程任务续跑：在上一次运行结束（完成 / 预算耗尽 / 中止）后，
+     * 追加迭代预算并从断点继续 —— 记忆完整保留，不会重新注入用户输入，
+     * 迭代编号从上次中断处继续。
+     *
+     * 适用于 [AgentEvent.BudgetExhausted] 之后由宿主（或用户确认后）触发。
+     * 引擎若不支持续跑，默认实现返回一条不可恢复的 [AgentEvent.Error]。
+     *
+     * @param extraIterations 追加的迭代预算。
+     */
+    fun continueExecution(extraIterations: Int = 25): Flow<AgentEvent> = kotlinx.coroutines.flow.flow {
+        emit(AgentEvent.Error("该引擎不支持续跑（continueExecution 未实现）", recoverable = false))
+    }
+
     /** 当前是否有任务在运行。 */
     val isRunning: Boolean
 }

@@ -43,7 +43,9 @@ import java.util.concurrent.atomic.AtomicLong
  * - **主循环只有一份**：模式 / 人设差异全部走 system prompt 注入与钩子，不 fork 循环；
  * - **事件流可见**：思考 / 工具 / 回复 / 用量 / 韧性全部以 [AgentEvent] 暴露；
  * - **生产韧性**：LLM 瞬时错误指数退避重试（不消耗迭代配额）、空响应重试、
- *   悬空 tool-call 修补、上下文压缩门；
+ *   悬空 tool-call 修补、上下文压缩门、相同调用循环护栏；
+ * - **长程任务**：[continueExecution] 预算续跑（记忆 / 迭代编号跨运行连续）、
+ *   [SystemContextProvider] 每轮动态上下文注入缝；
  * - **取消纪律**：[kotlinx.coroutines.CancellationException] 永远向上传播，绝不吞并。
  *
  * 配置热替换：[patchConfig] 读-改-写，下一轮迭代生效。
@@ -57,6 +59,8 @@ class DefaultAgentEngine(
     private val compressor: ContextCompressor = SlidingWindowCompressor(),
     private val hooks: HookRegistry = HookRegistry(),
     private val sessionId: String = "session-${System.currentTimeMillis()}",
+    /** 每轮求值的动态上下文提供者（时间 / 计划进度等实时状态）；异常被隔离，永不打断任务。 */
+    private val systemContextProvider: SystemContextProvider? = null,
 ) : AgentEngine {
 
     @Volatile
@@ -90,11 +94,34 @@ class DefaultAgentEngine(
     @Volatile
     private var inputDeferred: CompletableDeferred<String>? = null
 
+    /** 上一次运行的尾状态（迭代数 / 工具调用数），供 [continueExecution] 续跑衔接。 */
+    @Volatile
+    private var lastRunIterations: Int = 0
+
+    @Volatile
+    private var lastRunToolCalls: Int = 0
+
+    /** 本次运行起始时间（续跑段独立计时）。 */
+    @Volatile
+    private var runStartedAtMs: Long = 0L
+
+    /** 循环护栏（任务开始时按配置重建）。 */
+    @Volatile
+    private var loopDetector: ToolCallLoopDetector? = null
+
     override val isRunning: Boolean get() = running.get()
 
     // ------------------------------------------------------------------
     // 主循环
     // ------------------------------------------------------------------
+
+    /** 单次运行的累计器（续跑时由 [continueExecution] 接入上次数值继续累计）。 */
+    private class RunStats {
+        var iterations: Int = 0
+        var totalToolCalls: Int = 0
+        var completed: Boolean = false
+        var errorEmitted: Boolean = false
+    }
 
     override fun execute(input: UserInput): Flow<AgentEvent> = flow {
         // 单活跃任务互斥
@@ -102,12 +129,8 @@ class DefaultAgentEngine(
             emit(AgentEvent.Error("已有任务在运行，请等待完成或先 abort()", recoverable = false))
             return@flow
         }
-        aborted = false
-        currentJob = currentCoroutineContext()[Job]
-        val startedAt = System.currentTimeMillis()
-        var totalToolCalls = 0
-        var completed = false
-        var errorEmitted = false
+        beginRun()
+        val stats = RunStats()
 
         try {
             hooks.dispatch(HookEvent.SessionStart(sessionId))
@@ -115,65 +138,13 @@ class DefaultAgentEngine(
             val promptDecision = hooks.dispatch(HookEvent.UserPromptSubmit(input.text))
             if (promptDecision is HookDecision.Block) {
                 emit(AgentEvent.Error("输入被钩子拒绝: ${promptDecision.reason}", recoverable = false))
-                errorEmitted = true
+                stats.errorEmitted = true
                 return@flow
             }
             memory.appendUser(input.text, input.images)
 
-            var iteration = 0
-            while (iteration < configSnapshot.maxIterations && !aborted && currentCoroutineContext().isActive) {
-                iteration++
-                emit(AgentEvent.IterationStart(iteration))
-
-                maybeCompressContext()
-
-                val messages = buildMessages()
-                val tools = toolRegistry.getAllTools().map {
-                    ToolDefinition(name = it.name, description = it.description, parametersJsonSchema = it.parameters.render().toString())
-                }
-
-                // ---- LLM 流式一轮 ----
-                val turn = try {
-                    runLlmTurn(messages, tools)
-                } catch (e: LlmException) {
-                    emit(AgentEvent.Error("LLM 错误: ${e.message}", recoverable = LlmException.isTransient(e)))
-                    errorEmitted = true
-                    break
-                }
-                if (aborted || !currentCoroutineContext().isActive) break
-
-                // ---- 无工具调用：文本收尾 ----
-                if (turn.toolCalls.isEmpty()) {
-                    if (turn.text.isBlank()) {
-                        // 空响应重试已耗尽
-                        emit(AgentEvent.Error("LLM 返回空响应", recoverable = true))
-                        errorEmitted = true
-                        break
-                    }
-                    memory.appendAssistant(turn.text)
-                    val duration = System.currentTimeMillis() - startedAt
-                    emit(AgentEvent.Complete(turn.text, iteration, totalToolCalls, duration))
-                    hooks.dispatch(HookEvent.Stop(sessionId, turn.text))
-                    completed = true
-                    break
-                }
-
-                // ---- 有工具调用：执行并回填 ----
-                memory.appendAssistant(content = null, toolCalls = turn.toolCalls)
-                for (call in turn.toolCalls) {
-                    if (aborted || !currentCoroutineContext().isActive) break
-                    val result = executeOneCall(call)
-                    totalToolCalls++
-                    memory.appendToolResult(call.id, renderForModel(result))
-                }
-            }
-
-            if (!completed && !aborted && !errorEmitted) {
-                emit(AgentEvent.Error("达到最大迭代轮数（${configSnapshot.maxIterations}）仍未完成", recoverable = true))
-            }
-            if (aborted && !completed) {
-                emit(AgentEvent.Aborted)
-            }
+            runAgentLoop(stats, startIteration = 0)
+            emitTerminalEvents(stats)
         } catch (ce: CancellationException) {
             withContext(NonCancellable) { emit(AgentEvent.Aborted) }
             throw ce
@@ -185,8 +156,186 @@ class DefaultAgentEngine(
             withContext(NonCancellable) {
                 hooks.dispatch(HookEvent.SessionEnd(sessionId))
             }
+            endRun(stats)
+        }
+    }
+
+    override fun continueExecution(extraIterations: Int): Flow<AgentEvent> = flow {
+        if (!running.compareAndSet(false, true)) {
+            emit(AgentEvent.Error("已有任务在运行，无法续跑", recoverable = false))
+            return@flow
+        }
+        // 判据是记忆而非引擎内状态：文件记忆恢复的新实例（崩溃重启场景）同样可续跑
+        val hasHistory = memory.snapshot().any { it is LlmMessage.User }
+        if (!hasHistory) {
+            emit(AgentEvent.Error("没有可续跑的任务：请先 execute() 至少一轮", recoverable = false))
             running.set(false)
-            currentJob = null
+            return@flow
+        }
+        beginRun()
+        // 迭代编号衔接：同实例续跑从上次断点继续；新实例（记忆恢复）从 1 重新计
+        val startFrom = lastRunIterations.takeIf { it > 0 } ?: 0
+        val stats = RunStats().apply {
+            iterations = startFrom
+            totalToolCalls = lastRunToolCalls
+        }
+
+        try {
+            hooks.dispatch(HookEvent.SessionStart(sessionId))
+
+            // 预算扩充（下一轮生效）：主循环条件 iteration < maxIterations 天然衔接断点
+            patchConfig { it.copy(maxIterations = it.maxIterations + extraIterations) }
+            memory.appendSystem(
+                "（系统：迭代预算已追加 $extraIterations 轮。请从上次中断处继续当前任务，" +
+                    "不要重复已完成的工作，保持既有进度与结论。）",
+            )
+
+            runAgentLoop(stats, startIteration = startFrom)
+            emitTerminalEvents(stats)
+        } catch (ce: CancellationException) {
+            withContext(NonCancellable) { emit(AgentEvent.Aborted) }
+            throw ce
+        } catch (e: Exception) {
+            withContext(NonCancellable) {
+                emit(AgentEvent.Error("引擎异常: ${e.message ?: e.javaClass.simpleName}", recoverable = false))
+            }
+        } finally {
+            withContext(NonCancellable) {
+                hooks.dispatch(HookEvent.SessionEnd(sessionId))
+            }
+            endRun(stats)
+        }
+    }
+
+    /** 运行前公共初始化（互斥闸门通过后调用）。 */
+    private fun beginRun() {
+        aborted = false
+        runStartedAtMs = System.currentTimeMillis()
+        currentJob = null
+        val cfg = configSnapshot
+        loopDetector = if (cfg.loopDetectionEnabled) {
+            ToolCallLoopDetector(cfg.loopDetectionWindow, cfg.loopDetectionThreshold)
+        } else {
+            null
+        }
+    }
+
+    /** 运行收尾：释放闸门 + 记录尾状态供续跑。 */
+    private fun endRun(stats: RunStats) {
+        lastRunIterations = stats.iterations
+        lastRunToolCalls = stats.totalToolCalls
+        running.set(false)
+        currentJob = null
+    }
+
+    /**
+     * 主循环体：[execute] 与 [continueExecution] 共享同一份循环，绝不 fork。
+     * iteration 从 [startIteration] 继续计数（续跑时 = 上次断点）。
+     */
+    private suspend fun FlowCollector<AgentEvent>.runAgentLoop(
+        stats: RunStats,
+        startIteration: Int,
+    ) {
+        currentJob = currentCoroutineContext()[Job]
+        var iteration = startIteration
+        while (iteration < configSnapshot.maxIterations && !aborted && currentCoroutineContext().isActive) {
+            iteration++
+            stats.iterations = iteration
+            emit(AgentEvent.IterationStart(iteration))
+
+            maybeCompressContext()
+
+            val messages = buildMessages(currentDynamicContext())
+            val tools = toolRegistry.getAllTools().map {
+                ToolDefinition(name = it.name, description = it.description, parametersJsonSchema = it.parameters.render().toString())
+            }
+
+            // ---- LLM 流式一轮 ----
+            val turn = try {
+                runLlmTurn(messages, tools)
+            } catch (e: LlmException) {
+                emit(AgentEvent.Error("LLM 错误: ${e.message}", recoverable = LlmException.isTransient(e)))
+                stats.errorEmitted = true
+                return
+            }
+            if (aborted || !currentCoroutineContext().isActive) return
+
+            // ---- 无工具调用：文本收尾 ----
+            if (turn.toolCalls.isEmpty()) {
+                if (turn.text.isBlank()) {
+                    // 空响应重试已耗尽
+                    emit(AgentEvent.Error("LLM 返回空响应", recoverable = true))
+                    stats.errorEmitted = true
+                    return
+                }
+                memory.appendAssistant(turn.text)
+                stats.completed = true
+                val duration = System.currentTimeMillis() - runStartedAtMs
+                emit(AgentEvent.Complete(turn.text, iteration, stats.totalToolCalls, duration))
+                hooks.dispatch(HookEvent.Stop(sessionId, turn.text))
+                return
+            }
+
+            // ---- 有工具调用：执行并回填（含循环护栏） ----
+            memory.appendAssistant(content = null, toolCalls = turn.toolCalls)
+            for (call in turn.toolCalls) {
+                if (aborted || !currentCoroutineContext().isActive) break
+                val result = executeOneCall(call)
+                stats.totalToolCalls++
+                memory.appendToolResult(call.id, renderForModel(guardLoop(call, result)))
+            }
+        }
+    }
+
+    /** 终态事件：预算耗尽（可续跑信号）/ 中止。 */
+    private suspend fun FlowCollector<AgentEvent>.emitTerminalEvents(stats: RunStats) {
+        if (!stats.completed && !aborted && !stats.errorEmitted) {
+            val duration = System.currentTimeMillis() - runStartedAtMs
+            emit(
+                AgentEvent.BudgetExhausted(
+                    iterationsUsed = stats.iterations,
+                    maxIterations = configSnapshot.maxIterations,
+                    totalToolCalls = stats.totalToolCalls,
+                    durationMs = duration,
+                ),
+            )
+            emit(
+                AgentEvent.Error(
+                    "达到最大迭代轮数（${configSnapshot.maxIterations}）仍未完成；" +
+                        "长程任务可调用 continueExecution() 追加预算续跑",
+                    recoverable = true,
+                ),
+            )
+        }
+        if (aborted && !stats.completed) {
+            emit(AgentEvent.Aborted)
+        }
+    }
+
+    /**
+     * 循环护栏：同一工具 + 完全相同参数在窗口内重复达到阈值时，
+     * 发出 [AgentEvent.LoopDetected] 并把建议文本附加到回填给模型的结果上。
+     */
+    private suspend fun FlowCollector<AgentEvent>.guardLoop(call: ToolCall, result: ToolResult): ToolResult {
+        val detector = loopDetector ?: return result
+        if (call.name == ASK_USER_TOOL_NAME) return result // 交互挂起不构成循环风险
+        val repeats = detector.observe(call.name, call.arguments)
+        if (repeats >= detector.threshold && repeats % detector.threshold == 0) {
+            emit(AgentEvent.LoopDetected(call.name, repeats, call.arguments))
+            return result.copy(content = result.content + detector.advisoryText(repeats))
+        }
+        return result
+    }
+
+    /** 求值动态上下文；提供者异常被隔离（单点故障不允许打断任务）。 */
+    private suspend fun currentDynamicContext(): String {
+        val provider = systemContextProvider ?: return ""
+        return try {
+            provider.provideContext(sessionId)
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (e: Exception) {
+            ""
         }
     }
 
@@ -354,12 +503,15 @@ class DefaultAgentEngine(
     // 消息构建与修补
     // ------------------------------------------------------------------
 
-    private fun buildMessages(): List<LlmMessage> {
+    private fun buildMessages(dynamicContext: String): List<LlmMessage> {
         val system = buildString {
             append(configSnapshot.systemPrompt ?: DEFAULT_SYSTEM_PROMPT)
-            if (configSnapshot.additionalSystemContext.isNotBlank()) {
+            val dynamic = listOf(configSnapshot.additionalSystemContext, dynamicContext)
+                .filter { it.isNotBlank() }
+                .joinToString("\n\n")
+            if (dynamic.isNotBlank()) {
                 append("\n\n# 动态上下文\n")
-                append(configSnapshot.additionalSystemContext)
+                append(dynamic)
             }
         }
         return listOf(LlmMessage.System(system)) + repairDanglingToolCalls(memory.snapshot())
