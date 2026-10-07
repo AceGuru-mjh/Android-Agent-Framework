@@ -56,6 +56,34 @@ sealed interface AgentEvent {
      */
     data class UserInputRequired(val prompt: String, val timeoutMs: Long) : AgentEvent
 
+    // ---- 长程任务 ----
+
+    /**
+     * 迭代预算耗尽（长程任务可续跑信号）。
+     *
+     * 与普通 [Error] 区分：这是**可续跑的暂停点** —— 宿主可调用
+     * [AgentEngine.continueExecution] 追加预算从断点继续，记忆与进度完整保留。
+     * 之后仍会附带一条 recoverable 的 [Error] 事件（兼容只监听 Error 的旧宿主）。
+     */
+    data class BudgetExhausted(
+        val iterationsUsed: Int,
+        val maxIterations: Int,
+        val totalToolCalls: Int,
+        val durationMs: Long,
+    ) : AgentEvent
+
+    /**
+     * 循环护栏触发：同一工具 + 完全相同参数的调用在窗口内第 N 次出现。
+     *
+     * 护栏会在回填给模型的工具结果上附加“改变策略”的建议文本，
+     * 帮助模型跳出重复调用死循环（业界长程任务实测的高频失败模式）。
+     */
+    data class LoopDetected(
+        val toolName: String,
+        val repeatedCount: Int,
+        val arguments: String,
+    ) : AgentEvent
+
     // ---- 终态 ----
 
     data class Error(val message: String, val recoverable: Boolean) : AgentEvent
