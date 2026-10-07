@@ -155,7 +155,8 @@ class ShellSession(
                 val n = try {
                     proc.read(buf)
                 } catch (t: Throwable) {
-                    _state.value = SessionState.ERROR
+                    // 修复 issue #21 L-3：close() 已置 CLOSED 时不覆盖为 ERROR
+                    if (_state.value != SessionState.CLOSED) _state.value = SessionState.ERROR
                     break
                 }
                 if (n > 0) {
@@ -183,8 +184,12 @@ class ShellSession(
                 }
             }
             val code = runCatching { proc.waitFor(500) }.getOrDefault(-1)
-            _state.value = SessionState.EXITED
-            onExit?.invoke(code)
+            // 修复 issue #21 L-3：close() 先置 CLOSED 时，pump 收尾不得覆盖终态、
+            // 也不得再触发 onExit（旧实现会把 CLOSED 改写回 EXITED）
+            if (_state.value != SessionState.CLOSED) {
+                _state.value = SessionState.EXITED
+                onExit?.invoke(code)
+            }
             scope.cancel()
         }
     }
@@ -198,9 +203,13 @@ class ShellSession(
     private fun emitOrBuffer(chunk: ByteArray) {
         // 先发原始流（解析者），再清洗进渲染流（渲染者）
         _rawOutput.tryEmit(chunk)
-        appendCleanTail(chunk)
+        appendRawTail(chunk)
 
+        // 修复 issue #21 L-12：cleanTail 改存哨兵剥离后的文本 ——
+        // 旧实现只做 ANSI 清洗，__AGSH_* 内部标记会泄漏进 tailText /
+        // 控制 API session.tail / 会话检查点快照
         val cleaned = stripper.strip(chunk)
+        appendCleanTail(cleaned)
         if (cleaned.isEmpty()) return
 
         synchronized(pendingLock) {
@@ -216,8 +225,17 @@ class ShellSession(
         _output.tryEmit(cleaned)
     }
 
+    // 修复 issue #12：尾部环用有状态解码器增量解码，
+    // 避免多字节字符被读边界切开时产生 U+FFFD 污染检查点与控制 API
+    private val rawTailDecoder = Charsets.UTF_8.newDecoder()
+        .onMalformedInput(java.nio.charset.CodingErrorAction.REPLACE)
+        .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPLACE)
+
     private fun appendRawTail(chunk: ByteArray) {
-        val text = String(chunk, Charsets.UTF_8)
+        val cb = java.nio.CharBuffer.allocate(chunk.size + 1)
+        rawTailDecoder.decode(java.nio.ByteBuffer.wrap(chunk), cb, false)
+        cb.flip()
+        val text = cb.toString()
         if (text.isEmpty()) return
         synchronized(tailLock) {
             for (ch in text) {
@@ -227,8 +245,9 @@ class ShellSession(
         }
     }
 
-    private fun appendCleanTail(chunk: ByteArray) {
-        val text = AnsiStripper.clean(String(chunk, Charsets.UTF_8))
+    private fun appendCleanTail(cleaned: ByteArray) {
+        // cleaned 已由 SentinelStripper 从完整解码文本重新编码，不会出现半个多字节字符
+        val text = AnsiStripper.clean(String(cleaned, Charsets.UTF_8))
         if (text.isEmpty()) return
         synchronized(tailLock) {
             for (ch in text) {

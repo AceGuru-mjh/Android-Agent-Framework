@@ -12,8 +12,13 @@ import java.util.Base64
  * 保留 yl-ai 的实现要点：
  * - 握手：`Sec-WebSocket-Accept = base64(SHA1(key + GUID))`（与 RFC 示例值一致）；
  * - 服务端帧不加掩码；客户端帧 4 字节 XOR 解掩码；
- * - 帧上限 4MB（防恶意超长帧耗尽内存）；
- * - 分片续帧（opcode 0x0）不支持：显式抛异常而不是默默拼错。
+ * - 帧上限 4MB（防恶意超长帧耗尽内存）。
+ *
+ * 修复 issue #15（RFC 6455 合规）：
+ * - **分帧续传**：TEXT/BINARY + FIN=0 后跟 CONT 帧的完整组装（旧实现首分片被当完整
+ *   消息返回、后续 CONT 直接抛异常杀连接）；控制帧（PING/PONG/CLOSE）允许插在分片之间；
+ * - **64 位长度符号安全**：长度为负（首字节 ≥0x80）直接拒绝，不再触发 NegativeArraySize；
+ * - **未掩码客户端帧拒收**（RFC 6455 §5.1 要求服务端 fail-close）。
  *
  * 支持握手前已被上游 peek 过部分字节的场景（[handshakeWith]）。
  */
@@ -63,24 +68,6 @@ class WsConnection(
         return headers
     }
 
-    /** 读取一条文本帧。返回 null = 对端关闭。 */
-    fun readText(): String? {
-        while (true) {
-            val frame = readFrame() ?: return null
-            when (frame.opcode) {
-                OPCODE_TEXT -> return String(frame.payload, Charsets.UTF_8)
-                OPCODE_CLOSE -> {
-                    runCatching { sendFrame(OPCODE_CLOSE, ByteArray(0)) }
-                    return null
-                }
-                OPCODE_PING -> sendFrame(OPCODE_PONG, frame.payload)
-                OPCODE_PONG -> Unit
-                OPCODE_CONT -> throw IllegalStateException("收到分片续帧，本实现不支持分片")
-                else -> Unit
-            }
-        }
-    }
-
     fun sendText(text: String): Boolean = sendFrame(OPCODE_TEXT, text.toByteArray(Charsets.UTF_8))
 
     fun close() {
@@ -88,7 +75,52 @@ class WsConnection(
         runCatching { output.flush() }
     }
 
-    private class Frame(val opcode: Int, val payload: ByteArray)
+    private class Frame(val opcode: Int, val fin: Boolean, val payload: ByteArray)
+
+    /** 读取一条消息（自动组装分片）。返回 null = 对端关闭。 */
+    fun readText(): String? {
+        val data = readMessage() ?: return null
+        return String(data, Charsets.UTF_8)
+    }
+
+    /** 读取一条完整消息（分片组装 + 控制帧处理）。返回 null = 对端关闭。 */
+    private fun readMessage(): ByteArray? {
+        var assembled: ByteArray? = null
+        while (true) {
+            val frame = readFrame() ?: return null
+            when (frame.opcode) {
+                OPCODE_TEXT -> {
+                    if (assembled != null) {
+                        throw IllegalStateException("分片消息进行中收到新的数据帧（协议错误）")
+                    }
+                    if (frame.fin) return frame.payload
+                    assembled = frame.payload
+                }
+
+                OPCODE_CONT -> {
+                    if (assembled == null) {
+                        throw IllegalStateException("收到无起点的分片续帧（协议错误）")
+                    }
+                    val merged = ByteArray(assembled.size + frame.payload.size)
+                    assembled.copyInto(merged)
+                    frame.payload.copyInto(merged, assembled.size)
+                    if (merged.size > maxFrameBytes) {
+                        throw IllegalStateException("分片消息总长超限：${merged.size} 字节")
+                    }
+                    assembled = merged
+                    if (frame.fin) return assembled
+                }
+
+                OPCODE_CLOSE -> {
+                    runCatching { sendFrame(OPCODE_CLOSE, ByteArray(0)) }
+                    return null
+                }
+                OPCODE_PING -> sendFrame(OPCODE_PONG, frame.payload)
+                OPCODE_PONG -> Unit
+                else -> Unit
+            }
+        }
+    }
 
     private fun sendFrame(opcode: Int, payload: ByteArray): Boolean {
         return try {
@@ -126,7 +158,12 @@ class WsConnection(
         if (b1 < 0) return null
 
         val opcode = b0 and 0x0F
+        val fin = (b0 and 0x80) != 0
+        val rsv = b0 and 0x70
+        if (rsv != 0) throw IllegalStateException("RSV 位非零（未协商的扩展），协议错误")
         val masked = (b1 and 0x80) != 0
+        // RFC 6455 §5.1：客户端发给服务端的帧必须加掩码，未掩码帧 fail-close
+        if (!masked) throw IllegalStateException("客户端帧未加掩码（RFC 6455 §5.1），拒绝连接")
         var len = (b1 and 0x7F).toLong()
 
         if (len == 126L) {
@@ -136,16 +173,18 @@ class WsConnection(
             repeat(8) { len = (len shl 8) or readByte().toLong() }
         }
 
-        if (len > maxFrameBytes) throw IllegalStateException("帧过大：$len 字节（上限 $maxFrameBytes）")
-
-        val maskKey = if (masked) readFully(4) else null
-        val payload = readFully(len.toInt())
-        if (maskKey != null) {
-            for (i in payload.indices) {
-                payload[i] = (payload[i].toInt() xor maskKey[i % 4].toInt()).toByte()
-            }
+        // 修复 issue #15：64 位长度首字节 ≥0x80 时旧实现得到负 Long，
+        // 判空通过后 readFully(len.toInt()) 抛 NegativeArraySizeException
+        if (len < 0 || len > maxFrameBytes) {
+            throw IllegalStateException("帧长度非法：$len 字节（上限 $maxFrameBytes）")
         }
-        return Frame(opcode, payload)
+
+        val maskKey = readFully(4)
+        val payload = readFully(len.toInt())
+        for (i in payload.indices) {
+            payload[i] = (payload[i].toInt() xor maskKey[i % 4].toInt()).toByte()
+        }
+        return Frame(opcode, fin, payload)
     }
 
     private fun readByte(): Int {

@@ -18,6 +18,7 @@ java {
 dependencies {
     api(project(":agent-shell"))
     api(project(":agent-tools"))
+    api(project(":agent-chat"))
 
     api(libs.coroutines.core)
     api(libs.serialization.json)

@@ -62,30 +62,86 @@ object SentinelProtocol {
      *
      * 返回 null 表示 END 标记（或其退出码尾巴）尚未到齐 —— 调用方继续收集输出后再试。
      * 跨 chunk 安全：调用方应把写入 payload 之后收到的**全部**原始输出累计进来再调用。
+     *
+     * ## 行首锚定（修复 issue #8：PTY 回显开启时协议永不匹配）
+     *
+     * 真 PTY（回显开启）会把写入的 payload 原样回显，标记在回显行里**先于**真实输出
+     * 出现（如 `printf '\n__AGSH_<id>_BEGIN__\n'`，标记前面是引号而非换行）。
+     * 旧实现取第一个匹配 → 锚定到回显上，且回显 END 后跟字面量 `:%s`，
+     * 退出码正则永不匹配 → 每条命令都超时。
+     *
+     * 真实标记由 printf 输出，**必然行首出现**（前面是换行，或在缓冲开头）；
+     * 回显里的标记前面永远是普通字符。因此：
+     * - BEGIN 取**最后一个**「行首」出现（真实输出永远在回显之后）；
+     * - END 从 body 起点向后找**最后一个**「行首 + 紧跟 :<数字>」的出现。
      */
     fun extract(cumulative: String, id: String): Extraction? {
         val begin = beginMarker(id)
         val end = endMarker(id)
-        val b = cumulative.indexOf(begin)
-        if (b < 0) return null
 
-        val e = cumulative.indexOf(end, b + begin.length)
+        // BEGIN：最后一个「行首」出现（idx==0 或前面是 \n）
+        var b = -1
+        var searchFrom = 0
+        while (true) {
+            val idx = cumulative.indexOf(begin, searchFrom)
+            if (idx < 0) break
+            if (idx == 0 || cumulative[idx - 1] == '\n') b = idx
+            searchFrom = idx + 1
+        }
+        if (b < 0) return null
+        val bodyStart = b + begin.length
+
+        // END：最后一个「行首 + :<exitCode>」出现
+        var e = -1
+        var exitCode = -1
+        searchFrom = bodyStart
+        while (true) {
+            val idx = cumulative.indexOf(end, searchFrom)
+            if (idx < 0) break
+            if (idx > b && (idx == 0 || cumulative[idx - 1] == '\n')) {
+                parseExitCodeTail(cumulative, idx + end.length)?.let { code ->
+                    e = idx
+                    exitCode = code
+                }
+            }
+            searchFrom = idx + 1
+        }
         if (e < 0) return null
 
-        // END 标记后必须紧跟 :<exitCode>（同一行），否则视为标记未到齐
-        val afterEnd = cumulative.substring(e + end.length)
-        val codeMatch = Regex("^:(-?\\d+)").find(afterEnd) ?: return null
-        val exitCode = codeMatch.groupValues[1].toIntOrNull() ?: -1
+        val rawBody = cumulative.substring(bodyStart, e)
 
-        val rawBody = cumulative.substring(b + begin.length, e)
-
-        // 过滤哨兵回显行与 payload 注入行（PTY 会把写入的命令文本原样回显）
+        // 过滤哨兵回显行与 payload 注入行（PTY / set -v 会把写入的命令文本回显）
+        // 修复 issue #21 L-2：不再用宽匹配的 "printf '" 过滤（会误杀 grep 结果），
+        // 只滤含当前哨兵 id 的行 —— 行首锚定后回显行本已基本落在 body 之外
         val body = rawBody.lineSequence()
-            .filterNot { it.contains(begin) || it.contains(end) || it.contains("printf '") }
+            .filterNot { it.contains(begin) || it.contains(end) }
             .filterNot { it.trim() == "__agsh_rc=$?" }
             .joinToString("\n")
 
         return Extraction(exitCode = exitCode, rawBody = body)
+    }
+
+    /**
+     * 解析 END 标记后紧邻的 `:<digits>`（不匹配返回 null）。
+     *
+     * 手工解析而非正则：热路径（每个输出 chunk 一次）上不再重复编译/匹配正则
+     * （修复 issue #19 的正则部分）。供 [extract] 与 CommandRunner 的增量解析复用。
+     */
+    fun parseExitCodeTail(text: CharSequence, start: Int): Int? {
+        if (start >= text.length || text[start] != ':') return null
+        var j = start + 1
+        var negative = false
+        if (j < text.length && (text[j] == '-' || text[j] == '+')) {
+            negative = text[j] == '-'
+            j++
+        }
+        if (j >= text.length || !text[j].isDigit()) return null
+        var value = 0
+        while (j < text.length && text[j].isDigit()) {
+            value = value * 10 + (text[j] - '0')
+            j++
+        }
+        return if (negative) -value else value
     }
 
     /**

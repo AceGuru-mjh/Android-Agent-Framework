@@ -81,7 +81,9 @@ class SessionCheckpoint(
     private fun writeAtomic(container: Container): Boolean {
         return runCatching {
             baseDir.mkdirs()
-            val tmp = File(baseDir, "$FILE_NAME.tmp")
+            // 修复 issue #21 L-4：tmp 名加唯一后缀 —— 旧实现的固定 .tmp 路径
+            // 在并发 save 时互相截断，会产生损坏的检查点
+            val tmp = File(baseDir, "$FILE_NAME.tmp-${System.nanoTime()}")
             tmp.writeText(json.encodeToString(container))
             if (file.exists()) file.delete()
             if (!tmp.renameTo(file)) {

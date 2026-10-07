@@ -52,68 +52,76 @@ class CommandRunner(private val session: ShellSession) {
         val id = SentinelProtocol.newId()
         val payload = SentinelProtocol.buildPayload(command, id)
 
-        session.markBusy(true)
-        session.clearTail()
-
+        // 修复 issue #11：markBusy / 写入 / 收集协程全部纳入 try/finally 保护 ——
+        // 旧实现里 session.write 抛异常（shell 已死时管道写必抛）会导致
+        // busy 永久卡死 + 收集协程泄漏
         val collector = OutputCollector(id)
-        val collectJob: Job = CoroutineScope(Dispatchers.IO).launch {
-            session.rawOutput.collect { chunk -> collector.feed(chunk) }
-        }
+        var collectJob: Job? = null
+        try {
+            session.markBusy(true)
+            session.clearTail()
 
-        // 等订阅生效，防止 SharedFlow 订阅延迟吃掉首块输出（yl-ai 踩过的坑）
-        val subscribeDeadline = System.currentTimeMillis() + 3_000
-        while (session.subscriberCount == 0 && System.currentTimeMillis() < subscribeDeadline) {
-            delay(10)
-        }
-
-        val started = System.currentTimeMillis()
-        session.write(payload)
-
-        var shellDied = false
-        var exitCode: Int? = try {
-            withTimeout(timeoutMs) { collector.awaitEnd() }
-        } catch (te: TimeoutCancellationException) {
-            // 哨兵未到。若 shell 本身已被命令杀掉（exit / exec / 崩溃），
-            // 退出码从通道上取 —— 这是哨兵协议在「命令杀死 shell」场景的唯一出路
-            if (!session.isAlive) {
-                shellDied = true
-                session.waitForExit(2_000)
-            } else {
-                null
+            collectJob = CoroutineScope(Dispatchers.IO).launch {
+                session.rawOutput.collect { chunk -> collector.feed(chunk) }
             }
+
+            // 等订阅生效，防止 SharedFlow 订阅延迟吃掉首块输出（yl-ai 踩过的坑）
+            val subscribeDeadline = System.currentTimeMillis() + 3_000
+            while (session.subscriberCount == 0 && System.currentTimeMillis() < subscribeDeadline) {
+                delay(10)
+            }
+
+            val started = System.currentTimeMillis()
+            session.write(payload)
+
+            var shellDied = false
+            var exitCode: Int? = try {
+                withTimeout(timeoutMs) { collector.awaitEnd() }
+            } catch (te: TimeoutCancellationException) {
+                // 哨兵未到。若 shell 本身已被命令杀掉（exit / exec / 崩溃），
+                // 退出码从通道上取 —— 这是哨兵协议在「命令杀死 shell」场景的唯一出路
+                if (!session.isAlive) {
+                    shellDied = true
+                    session.waitForExit(2_000)
+                } else {
+                    null
+                }
+            } finally {
+                collectJob?.cancel()
+            }
+
+            val durationMs = System.currentTimeMillis() - started
+            val raw = collector.text()
+            val timedOut = exitCode == null && !shellDied
+
+            // 修复点：从累计缓冲提取 [BEGIN, END) 区间 + 精确退出码
+            val extraction = SentinelProtocol.extract(raw, id)
+            val body = extraction?.rawBody ?: raw // 超时等异常场景退化为原始输出
+            val deEchoed = SentinelProtocol.stripEchoedCommand(body, command)
+            val clean = AnsiStripper.clean(deEchoed)
+            val budget = maxOutputChars.coerceAtLeast(1000)
+            val truncated = AnsiStripper.truncate(
+                clean,
+                headChars = budget / 3,
+                tailChars = budget - budget / 3,
+            )
+
+            trackRecent(command)
+            trackCd(command)
+
+            CommandResult(
+                command = command,
+                exitCode = extraction?.exitCode ?: exitCode ?: -1,
+                stdout = truncated.text,
+                truncated = truncated.truncated,
+                omittedChars = truncated.omittedChars,
+                durationMs = durationMs,
+                timedOut = timedOut,
+            )
         } finally {
-            collectJob.cancel()
+            collectJob?.cancel()
             session.markBusy(false)
         }
-
-        val durationMs = System.currentTimeMillis() - started
-        val raw = collector.text()
-        val timedOut = exitCode == null && !shellDied
-
-        // 修复点：从累计缓冲提取 [BEGIN, END) 区间 + 精确退出码
-        val extraction = SentinelProtocol.extract(raw, id)
-        val body = extraction?.rawBody ?: raw // 超时等异常场景退化为原始输出
-        val deEchoed = SentinelProtocol.stripEchoedCommand(body, command)
-        val clean = AnsiStripper.clean(deEchoed)
-        val budget = maxOutputChars.coerceAtLeast(1000)
-        val truncated = AnsiStripper.truncate(
-            clean,
-            headChars = budget / 3,
-            tailChars = budget - budget / 3,
-        )
-
-        trackRecent(command)
-        trackCd(command)
-
-        CommandResult(
-            command = command,
-            exitCode = extraction?.exitCode ?: exitCode ?: -1,
-            stdout = truncated.text,
-            truncated = truncated.truncated,
-            omittedChars = truncated.omittedChars,
-            durationMs = durationMs,
-            timedOut = timedOut,
-        )
     }
 
     /** 近期是否重复执行过同一条命令（防死循环空转）。 */
@@ -146,17 +154,34 @@ class CommandRunner(private val session: ShellSession) {
     }
 
     /**
-     * 输出收集器：累计原始输出并从**累计缓冲**解析哨兵（跨 chunk 安全的修复点）。
+     * 输出收集器：累计原始输出并解析哨兵。
+     *
+     * ## 增量解析（修复 issue #19：每次 feed 全量重扫的 O(n²) 卡顿）
+     *
+     * 直接在 [StringBuilder] 上用 `indexOf(text, fromIndex)` 增量搜索：
+     * - BEGIN 找到后位置稳定（缓冲只追加），缓存 [beginIdx] 不再重搜；
+     * - END 搜索从上次游标继续（带跨界回看窗口），每个字节至多被扫一次。
+     *
+     * ## UTF-8 增量解码（修复 issue #12：多字节字符跨 chunk 损坏）
+     *
+     * 用有状态 CharsetDecoder 解码，被读边界切开的多字节字符由解码器保存状态补齐。
      */
     private class OutputCollector(private val id: String) {
         private val sb = StringBuilder()
         private val lock = Any()
         private var waiter: CancellableContinuation<Int>? = null
 
+        private val decoder = Charsets.UTF_8.newDecoder()
+            .onMalformedInput(java.nio.charset.CodingErrorAction.REPLACE)
+            .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPLACE)
+
+        private var beginIdx = -1
+        private var beginScanFrom = 0
+        private var endScanFrom = 0
+
         fun feed(chunk: ByteArray) {
-            val text = String(chunk, Charsets.UTF_8)
             synchronized(lock) {
-                sb.append(text)
+                sb.append(decodeChunk(chunk))
                 tryParseExit()?.let { code ->
                     waiter?.let { w -> if (w.isActive) w.resume(code) }
                     waiter = null
@@ -164,10 +189,38 @@ class CommandRunner(private val session: ShellSession) {
             }
         }
 
-        /** 在累计缓冲里找 END 标记 + `:<exitCode>`。 */
+        private fun decodeChunk(chunk: ByteArray): String {
+            val cb = java.nio.CharBuffer.allocate(chunk.size + 1)
+            decoder.decode(java.nio.ByteBuffer.wrap(chunk), cb, false)
+            cb.flip()
+            return cb.toString()
+        }
+
+        /** 增量在累计缓冲里找 BEGIN + END 标记 + `:<exitCode>`。 */
         private fun tryParseExit(): Int? {
-            val extraction = SentinelProtocol.extract(sb.toString(), id) ?: return null
-            return extraction.exitCode
+            if (beginIdx < 0) {
+                val beginNeedle = "\n" + SentinelProtocol.beginMarker(id)
+                val idx = sb.indexOf(beginNeedle, beginScanFrom)
+                if (idx < 0) {
+                    beginScanFrom = (sb.length - beginNeedle.length + 1).coerceAtLeast(0)
+                    return null
+                }
+                beginIdx = idx + 1
+                endScanFrom = beginIdx
+            }
+
+            val endNeedle = "\n" + SentinelProtocol.endMarker(id)
+            var from = (endScanFrom - endNeedle.length + 1).coerceAtLeast(beginIdx)
+            while (true) {
+                val idx = sb.indexOf(endNeedle, from)
+                if (idx < 0) {
+                    endScanFrom = (sb.length - endNeedle.length + 1).coerceAtLeast(beginIdx)
+                    return null
+                }
+                val code = SentinelProtocol.parseExitCodeTail(sb, idx + endNeedle.length)
+                if (code != null) return code
+                from = idx + 1
+            }
         }
 
         suspend fun awaitEnd(): Int = suspendCancellableCoroutine { cont ->

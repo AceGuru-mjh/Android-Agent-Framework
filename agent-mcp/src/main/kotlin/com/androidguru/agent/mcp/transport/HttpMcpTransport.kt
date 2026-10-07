@@ -141,6 +141,12 @@ class HttpMcpTransport(
         })
         try {
             return deferred.await()
+        } catch (ce: kotlinx.coroutines.CancellationException) {
+            // 修复 issue #21 L-6：协程取消时同步取消 OkHttp Call；
+            // 已到达但未被消费的 Response 也要关闭（连接泄漏）
+            call.cancel()
+            runCatching { if (deferred.isCompleted) deferred.getCompleted().close() }
+            throw ce
         } finally {
             inFlight.remove(call)
         }
@@ -151,5 +157,8 @@ class HttpMcpTransport(
     override suspend fun close() {
         if (!closed.compareAndSet(false, true)) return
         sessionId = null
+        // 修复 issue #21 L-6：close 时清理在途请求
+        inFlight.keys.forEach { runCatching { it.cancel() } }
+        inFlight.clear()
     }
 }

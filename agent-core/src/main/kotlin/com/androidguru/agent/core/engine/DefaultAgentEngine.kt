@@ -145,6 +145,7 @@ class DefaultAgentEngine(
 
             runAgentLoop(stats, startIteration = 0)
             emitTerminalEvents(stats)
+
         } catch (ce: CancellationException) {
             withContext(NonCancellable) { emit(AgentEvent.Aborted) }
             throw ce
@@ -277,7 +278,9 @@ class DefaultAgentEngine(
             }
 
             // ---- 有工具调用：执行并回填（含循环护栏） ----
-            memory.appendAssistant(content = null, toolCalls = turn.toolCalls)
+            // 修复 issue #21 L-11：伴随工具调用的正文已 emit 给用户，也必须入记忆 ——
+            // content = null 会让下一轮上下文丢失该段（模型看起来"失忆"）
+            memory.appendAssistant(content = turn.text.ifBlank { null }, toolCalls = turn.toolCalls)
             for (call in turn.toolCalls) {
                 if (aborted || !currentCoroutineContext().isActive) break
                 val result = executeOneCall(call)

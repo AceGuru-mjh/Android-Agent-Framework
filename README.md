@@ -24,9 +24,10 @@
 | `agent-tools` | 工具系统：注册表、五段执行管线（门控/钩子/校验/熔断/限流）、Schema DSL、结构化结果 | — |
 | `agent-llm` | LLM 适配层：OpenAI 兼容流式客户端（SSE + 工具调用累积）、消息模型、端点差异适配 | — |
 | `agent-mcp` | **全新重做**的 MCP 协议：JSON-RPC 2.0、stdio / Streamable HTTP 双传输、客户端 + 服务端 + 工具桥 | [MCP_GUIDE.md](docs/MCP_GUIDE.md) |
+| `agent-chat` | **聊天层**（自 yl-ai 融入）：五类卡片模型、历史持久化（原子写 + 上限 + 作业对账）、事件→卡片转译器（流式权威对齐 / 审批内联卡 / 取消回填） | [HOST_UI.md](docs/HOST_UI.md) |
 | `agent-plugin` | **全新重做**的插件 SDK：ServiceLoader 发现、三道信任门、宿主能力桥 | [PLUGIN_SDK.md](docs/PLUGIN_SDK.md) |
-| `agent-shell` | **全新移植**的终端引擎：共享终端会话、哨兵式命令执行、命令风险分级、挂起式审批闸门、后台作业、Alpine 容器（PRoot）、本地控制 API、审计与崩溃恢复 | [SHELL_GUIDE.md](docs/SHELL_GUIDE.md) |
-| `agent-shell-tools` | **全新移植**的终端工具集：19 个正交 AgentTool、审批/审计钩子、系统提示词构建器、平台能力 SPI | [SHELL_GUIDE.md](docs/SHELL_GUIDE.md) |
+| `agent-shell` | **全新移植**的终端引擎：共享终端会话、哨兵式命令执行、命令风险分级、挂起式审批闸门、后台作业、Alpine 容器（PRoot）、**Termux 环境**（proot 自映射）、本地控制 API、审计与崩溃恢复 | [SHELL_GUIDE.md](docs/SHELL_GUIDE.md) |
+| `agent-shell-tools` | **全新移植**的终端工具集：20 个正交 AgentTool、审批/审计钩子、系统提示词构建器、平台能力 SPI | [SHELL_GUIDE.md](docs/SHELL_GUIDE.md) |
 | `agent-shell-native` | **C++17 原生增强层**（PR #5）：forkpty 真 PTY 通道（NativeProcessChannelFactory）、ANSI 批量清洗、ELF64 补丁（RUNPATH/SONAME），不可用时优雅回退纯 JVM | [NATIVE_GUIDE.md](docs/NATIVE_GUIDE.md) |
 | `agent-tasks` | **长程任务系统**（PR #22）：TaskPlan 计划状态机（rewrite/patch 双模式）、每轮计划状态注入、进度观察、文件持久化 + `LongTaskAgent` 装配门面 | [LONG_TASK_GUIDE.md](docs/LONG_TASK_GUIDE.md) |
 | `examples/simple-agent` | 最小可运行示例：控制台对话 Agent（含插件演示） | [GETTING_STARTED.md](docs/GETTING_STARTED.md) |
@@ -121,6 +122,7 @@ CI 产出的成品库在 Actions → Artifacts 下载。
 - [x] **PR #3** — 插件系统重做 + 示例 + 发布工作流（agent-plugin / examples / release）
 - [x] **PR #4** — 终端能力整体移植：agent-shell / agent-shell-tools（自 yl-ai 移植重写，修复哨兵协议缺陷）
 - [x] **PR #5** — C++17 原生增强层（agent-shell-native）+ PRoot RUNPATH 自动清空 + CI 全面编译验证（JVM 矩阵 / C++ host / NDK 交叉编译）+ PR 门禁（pr-check.yml）
+- [ ] **PR #23** — yl-ai 全量融合收尾 + 全线加固：Termux 环境（agent-shell/termux + termux_exec 工具）、聊天层（agent-chat）、控制 API 自检器、设置存储（SecretVault 首个消费者）、LLM 细节（cachedTokens / normalizeEndpoint / 8 家预设 / 自带工具注入）；**23 项 bug 修复**（issues #8–#21：PTY 回显哨兵锚定、写入通道门控、熔断探测槽泄漏、UTF-8 跨 chunk、审计取旧、策略绕过、RFC 6455 合规等）
 
 ## License
 

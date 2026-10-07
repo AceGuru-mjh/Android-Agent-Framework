@@ -40,6 +40,15 @@ class ApprovalGate {
         val reason: String? = null,
         val canRollback: Boolean = false,
         val rollbackHint: String? = null,
+        /**
+         * 显式审批记忆键（ALLOW_ALWAYS 的作用域）。
+         *
+         * 修复 issue #17：旧实现从 [detail] 首词猜测记忆键，fs 类操作（detail 是路径）
+         * 会退化为文件名 —— 对 `/home/a/config.txt` 点"本次都允许"会放行任意目录的
+         * 同名文件。提供 [memoryKey] 时优先使用（fs 类应传完整规范路径），
+         * 未提供时才回退到旧的「工具名:首词」启发式。
+         */
+        val memoryKey: String? = null,
     )
 
     enum class Verdict {
@@ -53,7 +62,15 @@ class ApprovalGate {
         DENY,
     }
 
-    private val pending = ConcurrentHashMap<String, CompletableDeferred<Verdict>>()
+    // 修复 issue #21 L-10：ALLOW_ALWAYS 记忆键随请求一起存入 pending 表，
+    // respond 时用请求自身的 key，不再读 currentRequest（并发请求互踩时
+    // 旧实现会把「本次都允许」记到别的请求头上）
+    private val pending = ConcurrentHashMap<String, PendingRequest>()
+
+    private class PendingRequest(
+        val deferred: CompletableDeferred<Verdict>,
+        val memoryKey: String?,
+    )
 
     private val alwaysAllow = mutableSetOf<String>()
     private val alwaysLock = Any()
@@ -75,7 +92,7 @@ class ApprovalGate {
         }
 
         val deferred = CompletableDeferred<Verdict>()
-        pending[req.id] = deferred
+        pending[req.id] = PendingRequest(deferred, key)
         currentRequest = req
         _requests.value = req
         return try {
@@ -91,15 +108,11 @@ class ApprovalGate {
 
     /** 宿主 UI 提交裁决。返回是否有对应等待中的请求。 */
     fun respond(requestId: String, verdict: Verdict): Boolean {
-        val deferred = pending[requestId] ?: return false
-        if (verdict == Verdict.ALLOW_ALWAYS) {
-            currentRequest?.takeIf { it.id == requestId }?.let { req ->
-                decisionKey(req)?.let { key ->
-                    synchronized(alwaysLock) { alwaysAllow.add(key) }
-                }
-            }
+        val entry = pending[requestId] ?: return false
+        if (verdict == Verdict.ALLOW_ALWAYS && entry.memoryKey != null) {
+            synchronized(alwaysLock) { alwaysAllow.add(entry.memoryKey!!) }
         }
-        deferred.complete(verdict)
+        entry.deferred.complete(verdict)
         return true
     }
 
@@ -110,18 +123,20 @@ class ApprovalGate {
 
     /** 取消全部等待中的请求（全部判 DENY）。 */
     fun cancelAll() {
-        pending.values.forEach { it.complete(Verdict.DENY) }
+        pending.values.forEach { it.deferred.complete(Verdict.DENY) }
         pending.clear()
         currentRequest = null
         _requests.value = null
     }
 
     /**
-     * 审批记忆的 key：`工具名:命令首词`。BLOCKED 级别返回 null —— 拒绝级决策
+     * 审批记忆的 key：优先用请求显式声明的 [Request.memoryKey]；
+     * 否则回退到 `工具名:命令首词` 启发式。BLOCKED 级别返回 null —— 拒绝级决策
      * 永远不进记忆表，不存在「本次都允许」。
      */
     private fun decisionKey(req: Request): String? {
         if (req.level == CommandPolicy.Level.BLOCKED) return null
+        req.memoryKey?.let { return it }
         val firstWord = req.detail.trim().split(Regex("\\s+")).firstOrNull()?.substringAfterLast('/') ?: return null
         return "${req.toolName}:$firstWord"
     }

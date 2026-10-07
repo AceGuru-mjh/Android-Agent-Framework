@@ -217,4 +217,75 @@ object TerminalTools {
             }
         }
     }
+
+    /**
+     * termux_exec：在 Termux 环境里一次性执行命令（apt / bash 工具链）。
+     *
+     * 与 container_exec 的分工（yl-ai 里程碑 2 规划的 `termux_exec`）：
+     * 容器文件系统独立、适合装软件包实验；Termux 环境与官方 Termux 布局一致、
+     * 启动开销更低，日常命令行任务优先用它。与共享终端会话互不占用 ——
+     * 一次性命令经独立通道执行，不会打断用户正在看的终端。
+     *
+     * 安全决策不在这里做 —— 审批钩子在 PreToolUse 段统一门控。
+     */
+    fun termuxExec(runtime: ShellRuntime): AgentTool = object : AgentTool {
+        override val id = ShellToolSet.ToolIds.TERMUX_EXEC
+        override val description =
+            "在 Termux 环境里执行一条命令（apt / bash / python 等工具链可用）。" +
+                "适合日常命令行任务，比 Alpine 容器启动更快。环境未安装时返回安装指引。"
+        override val parameters = ToolSchema.build {
+            string("command", "要在 Termux 环境内执行的命令", required = true)
+            integer("timeout_ms", "超时毫秒数（默认 120000，范围 5000–600000）",
+                minimum = 5000.0, maximum = 600000.0)
+            string("purpose", "这条命令的目的（一句话，展示给用户）")
+        }
+        override val metadata = ToolMetadata(
+            id = id,
+            category = ToolCategory.SHELL,
+            risk = ToolRisk.MEDIUM,
+            annotations = com.androidguru.agent.tools.ToolAnnotations(openWorldHint = true),
+            tags = setOf("terminal", "termux", "proot"),
+        )
+
+        override suspend fun execute(request: ToolRequest): ToolResult {
+            val args = JsonArgs.parse(request.arguments)
+            val command = args.str("command")?.trim().orEmpty()
+            if (command.isEmpty()) return ToolResult.invalid("command", "command 不能为空")
+            val timeoutMs = (args.long("timeout_ms") ?: 120_000L).coerceIn(5_000, 600_000)
+
+            if (!runtime.termux.isInstalled) {
+                return ToolResult.failure(
+                    "Termux 环境尚未安装。请告知用户：先执行 Termux 环境安装" +
+                        "（约 30 MB，多镜像回退 + 官方 SHA256 校验），安装完成后本工具即可用。",
+                    ToolErrorCode.UNAVAILABLE,
+                    suggestion = "不要反复尝试；先向用户说明需要安装 Termux 环境",
+                )
+            }
+            val ready = runtime.termuxLauncher.prepare()
+            if (!ready.available) {
+                return ToolResult.failure(
+                    "Termux 环境未就绪：${ready.reason}",
+                    ToolErrorCode.UNAVAILABLE,
+                    suggestion = "向用户转述原因，不要反复重试",
+                )
+            }
+
+            return try {
+                val text = runtime.termuxLauncher.runShellCommand(command, timeoutMs = timeoutMs)
+                if (text.contains("退出码: 0")) {
+                    ToolResult.success(text)
+                } else {
+                    ToolResult.failure(
+                        text,
+                        ToolErrorCode.UNKNOWN,
+                        suggestion = "读 Termux 环境内的错误输出后调整命令",
+                    )
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                ToolResult.failure("Termux 执行失败：${e.message ?: e.javaClass.simpleName}", ToolErrorCode.UNAVAILABLE)
+            }
+        }
+    }
 }

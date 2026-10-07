@@ -49,23 +49,64 @@ class WsConnectionTest {
         assertEquals("hello", String(bytes, 2, 5, Charsets.UTF_8))
     }
 
+    /** 构造一个带掩码的客户端帧（RFC 6455 §5.1 要求客户端帧必须掩码）。 */
+    private fun maskedFrame(opcode: Int, fin: Boolean, payload: ByteArray): ByteArray {
+        val mask = byteArrayOf(0x11, 0x22, 0x33, 0x44)
+        val masked = ByteArray(payload.size) { i -> (payload[i].toInt() xor mask[i % 4].toInt()).toByte() }
+        val b0 = (if (fin) 0x80 else 0) or opcode
+        return byteArrayOf(b0.toByte(), (0x80 or payload.size).toByte()) + mask + masked
+    }
+
     @Test
     fun `readText 解析带掩码的客户端帧`() {
         // 手工构造带掩码的 "ping" 帧
-        val payload = "ping".toByteArray(Charsets.UTF_8)
-        val mask = byteArrayOf(0x11, 0x22, 0x33, 0x44)
-        val masked = ByteArray(payload.size) { i -> (payload[i].toInt() xor mask[i % 4].toInt()).toByte() }
-        val frame = byteArrayOf(0x81.toByte(), (0x80 or payload.size).toByte()) + mask + masked
-
+        val frame = maskedFrame(0x1, fin = true, payload = "ping".toByteArray(Charsets.UTF_8))
         val ws = WsConnection(ByteArrayInputStream(frame), ByteArrayOutputStream())
         assertEquals("ping", ws.readText())
     }
 
     @Test
     fun `close帧返回null`() {
-        val frame = byteArrayOf(0x88.toByte(), 0x00) // FIN|close, len 0（客户端帧应有掩码，服务端宽容读）
-        val ws = WsConnection(ByteArrayInputStream(frame), ByteArrayOutputStream())
+        val ws = WsConnection(ByteArrayInputStream(maskedFrame(0x8, fin = true, ByteArray(0))), ByteArrayOutputStream())
         assertNull(ws.readText())
+    }
+
+    @Test
+    fun `分片消息被完整组装`() {
+        // 修复 issue #15：FIN=0 的首分片 + CONT 续帧 → 组装为一条完整消息
+        val first = maskedFrame(0x1, fin = false, payload = "hel".toByteArray(Charsets.UTF_8))
+        val cont = maskedFrame(0x0, fin = true, payload = "lo".toByteArray(Charsets.UTF_8))
+        val ws = WsConnection(ByteArrayInputStream(first + cont), ByteArrayOutputStream())
+        assertEquals("hello", ws.readText())
+    }
+
+    @Test
+    fun `未掩码客户端帧被拒绝`() {
+        // 修复 issue #15：RFC 6455 §5.1 要求服务端对未掩码客户端帧 fail-close
+        val frame = byteArrayOf(0x81.toByte(), 0x04) + "ping".toByteArray()
+        val ws = WsConnection(ByteArrayInputStream(frame), ByteArrayOutputStream())
+        var threw = false
+        try {
+            ws.readText()
+        } catch (e: IllegalStateException) {
+            threw = true
+        }
+        assertTrue(threw)
+    }
+
+    @Test
+    fun `负的64位长度被拒绝`() {
+        // 修复 issue #15：长度首字节 ≥0x80 时旧实现得到负 Long → NegativeArraySize
+        val header = byteArrayOf(0x81.toByte(), 127.toByte()) + ByteArray(8) { 0x85.toByte() } +
+            ByteArray(4) // mask key
+        val ws = WsConnection(ByteArrayInputStream(header), ByteArrayOutputStream())
+        var threw = false
+        try {
+            ws.readText()
+        } catch (e: IllegalStateException) {
+            threw = true
+        }
+        assertTrue(threw)
     }
 
     @Test

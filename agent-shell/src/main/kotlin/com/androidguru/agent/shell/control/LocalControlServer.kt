@@ -3,6 +3,7 @@ package com.androidguru.agent.shell.control
 import com.androidguru.agent.shell.audit.AuditLog
 import com.androidguru.agent.shell.policy.ApprovalGate
 import com.androidguru.agent.shell.policy.CommandPolicy
+import com.androidguru.agent.shell.policy.WriteGate
 import com.androidguru.agent.shell.session.CommandRunner
 import com.androidguru.agent.shell.session.ShellSession
 import com.androidguru.agent.shell.session.ShellSessionManager
@@ -50,6 +51,13 @@ class LocalControlServer(
     private val environment: com.androidguru.agent.shell.runtime.ShellEnvironment,
     private val tokenStore: File,
     private val version: String = "1.0",
+    /**
+     * runner 提供器。修复 issue #18：旧实现自建一份 runner 缓存，
+     * 与 ShellRuntime 的缓存形成同一会话两个 CommandRunner —— 两把互不相干的
+     * Mutex，agent 工具与控制 API 并发 exec 时哨兵输出互相污染。
+     * ShellRuntime 组装时传入 `{ runnerOf(it) }` 共享同一份缓存。
+     */
+    private val runnerProvider: (ShellSession) -> CommandRunner = { CommandRunner(it) },
 ) {
 
     private val json = Json { ignoreUnknownKeys = true }
@@ -57,9 +65,6 @@ class LocalControlServer(
     private var serverSocket: ServerSocket? = null
     private var acceptThread: Thread? = null
     private val clients = ConcurrentHashMap<String, WsConnection>()
-
-    /** 每会话一个 CommandRunner（串行执行语义随会话走）。 */
-    private val runners = ConcurrentHashMap<String, CommandRunner>()
 
     @Volatile
     var enabled: Boolean = false
@@ -82,6 +87,13 @@ class LocalControlServer(
         runCatching {
             tokenStore.parentFile?.mkdirs()
             tokenStore.writeText(t)
+            // 修复 issue #21 L-7：令牌文件权限收收紧到仅属主可读写
+            runCatching {
+                java.nio.file.Files.setPosixFilePermissions(
+                    tokenStore.toPath(),
+                    java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"),
+                )
+            }
         }
         return t
     }
@@ -130,7 +142,10 @@ class LocalControlServer(
 
     private suspend fun handleClient(socket: Socket) {
         socket.use { s ->
-            s.soTimeout = 0
+            // 修复 issue #21 L-8：握手阶段限时（旧实现 soTimeout=0 无限阻塞，
+            // 64 个空闲 TCP 连接即可占满 Dispatchers.IO —— slowloris 打瘫控制面）；
+            // 认证通过后再放开为无限时（会话内长连接）
+            s.soTimeout = 10_000
             val head = readHead(s.getInputStream()) ?: return
             val rawHead = String(head, Charsets.US_ASCII)
             val firstLine = rawHead.lineSequence().firstOrNull() ?: return
@@ -140,9 +155,11 @@ class LocalControlServer(
                 s.getOutputStream().write(
                     "HTTP/1.1 401 Unauthorized\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n".toByteArray(),
                 )
-                audit.recordSetting("api.auth_failed", firstLine.take(120))
+                // 修复 issue #21 L-7：先脱敏令牌再写审计（?token=… 明文入日志）
+                audit.recordSetting("api.auth_failed", redactToken(firstLine.take(120)))
                 return
             }
+            s.soTimeout = 0
 
             val ws = WsConnection(s.getInputStream(), s.getOutputStream())
             // 握手前已 peek 过部分字节（head 里可能含握手之后的数据？不会 —— 升级前无数据）
@@ -197,6 +214,10 @@ class LocalControlServer(
         for (i in a.indices) diff = diff or (a[i].code xor b[i].code)
         return diff == 0
     }
+
+    /** 审计脱敏：抹掉查询串里的 token 参数值。 */
+    private fun redactToken(line: String): String =
+        Regex("""(token=)[^&\s]+""").replace(line, "$1***")
 
     // ---------------- 协议分发 ----------------
 
@@ -305,7 +326,7 @@ class LocalControlServer(
                 }
             }
 
-            val runner = runners.computeIfAbsent(session.id) { CommandRunner(session) }
+            val runner = runnerProvider(session)
             val result = runner.run(command, timeoutMs = timeoutMs)
             audit.recordCommand(
                 AuditLog.Source.API, command,
@@ -329,7 +350,16 @@ class LocalControlServer(
         "session.write" -> {
             val session = p.str("sessionId")?.let { sessions.get(it) } ?: sessions.active
                 ?: throw IllegalStateException("没有可用会话")
-            session.write(p.str("input") ?: "")
+            val input = p.str("input") ?: ""
+            // 修复 issue #9：session.write 旧实现完全绕过策略与审计 ——
+            // 外部客户端被拒后可以换 write 通道执行任意命令。
+            // 现在与 terminal_write 走同一套 WriteGate 行级门控
+            val gate = WriteGate.gate(input, AuditLog.Source.API, policy, audit)
+            if (!gate.allowed) {
+                throw IllegalStateException("写入被安全策略拦截：${gate.reason}")
+            }
+            session.write(input)
+            audit.recordSetting("api.session.write", "session=${session.id} bytes=${input.toByteArray().size}")
             buildJsonObject { put("ok", true) }
         }
 
@@ -393,6 +423,8 @@ class LocalControlServer(
                     impact = "${content.length} 字符，${if (append) "追加" else "覆盖"}",
                     level = CommandPolicy.Level.CONFIRM,
                     canRollback = false,
+                    // 修复 issue #17：记忆键用完整路径
+                    memoryKey = "api.fs.write:${File(path).absolutePath}",
                 ),
             )
             if (verdict == ApprovalGate.Verdict.DENY) {
