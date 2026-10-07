@@ -145,6 +145,31 @@ class ChatPresenter(
             is AgentEvent.Aborted ->
                 update { ChatReducer.cancelTurn(it, clock()) }
 
+            // PR #22 长程任务事件：预算耗尽是回合收尾（ WARN 注 + 气泡收口），
+            // 循环护栏是过程提示（INFO 注，回合继续，不收口）
+            is AgentEvent.BudgetExhausted ->
+                update { list ->
+                    ChatReducer.closeStreaming(
+                        ChatReducer.note(
+                            list,
+                            "本轮预算用尽（${event.iterationsUsed}/${event.maxIterations} 轮、${event.totalToolCalls} 次工具调用）。" +
+                                "继续对话即可接续任务。",
+                            ChatItem.Level.WARN,
+                            clock(),
+                        ),
+                    )
+                }
+
+            is AgentEvent.LoopDetected ->
+                update { list ->
+                    ChatReducer.note(
+                        list,
+                        "检测到 ${event.toolName} 重复调用 ${event.repeatedCount} 次，已注入纠偏提示。",
+                        ChatItem.Level.INFO,
+                        clock(),
+                    )
+                }
+
             // 过程事件：不出卡片（理由见类 KDoc）
             is AgentEvent.IterationStart,
             is AgentEvent.ThinkingChunk,
@@ -400,6 +425,10 @@ internal object ChatReducer {
         next[idx] = bubble.copy(text = aligned, streaming = false)
         return next
     }
+
+    /** 过程注（预算/循环护栏等非终态提示）：直接追加一条 SystemNote。 */
+    fun note(items: List<ChatItem>, text: String, level: ChatItem.Level, ts: Long): List<ChatItem> =
+        items + ChatItem.SystemNote(text = text, level = level, ts = ts)
 
     /** 错误收口：流式气泡置终态 + 追加 ERROR 系统注。 */
     fun failTurn(items: List<ChatItem>, message: String, ts: Long): List<ChatItem> =
