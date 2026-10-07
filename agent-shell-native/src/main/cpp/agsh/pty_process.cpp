@@ -13,6 +13,7 @@
 #include <sys/ioctl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <termios.h>
 #include <unistd.h>
 
 #if defined(__APPLE__)
@@ -67,6 +68,22 @@ SpawnHandle pty_spawn(const SpawnRequest& req, SpawnError* out_error, std::strin
     ws.ws_row = req.rows > 0 ? static_cast<unsigned short>(req.rows) : 24;
     ws.ws_col = req.cols > 0 ? static_cast<unsigned short>(req.cols) : 80;
 
+    // slave termios：优先继承调用方终端（交互宿主）；stdin 非 tty 时
+    //（服务端 / CI）构造标准 cooked 终端 —— 特别是 OPOST|ONLCR：
+    // 否则 echo 输出只有 \n，与真实终端行为不一致（CI 实测坑）。
+    struct termios tio {};
+    if (tcgetattr(STDIN_FILENO, &tio) != 0) {
+        cfmakeraw(&tio);
+        tio.c_iflag = static_cast<tcflag_t>(tio.c_iflag | ICRNL | IXON | IUTF8);
+        tio.c_oflag = static_cast<tcflag_t>(OPOST | ONLCR);
+        tio.c_lflag = static_cast<tcflag_t>(ISIG | ICANON | ECHO | ECHOE | ECHOK | IEXTEN);
+        tio.c_cflag = static_cast<tcflag_t>(tio.c_cflag | CREAD | CLOCAL);
+        tio.c_cc[VMIN] = 1;
+        tio.c_cc[VTIME] = 0;
+        cfsetispeed(&tio, B38400);
+        cfsetospeed(&tio, B38400);
+    }
+
     // fork 前阻塞 SIGCHLD：消灭「子进程在父进程登记完成前死亡」的竞态窗口。
     sigset_t chld, previous;
     sigemptyset(&chld);
@@ -74,7 +91,7 @@ SpawnHandle pty_spawn(const SpawnRequest& req, SpawnError* out_error, std::strin
     pthread_sigmask(SIG_BLOCK, &chld, &previous);
 
     int master = -1;
-    pid_t pid = forkpty(&master, nullptr, nullptr, &ws);
+    pid_t pid = forkpty(&master, nullptr, &tio, &ws);
 
     if (pid == 0) {
         // ---- 子进程 ----
@@ -87,7 +104,7 @@ SpawnHandle pty_spawn(const SpawnRequest& req, SpawnError* out_error, std::strin
 
         if (!req.cwd.empty() && chdir(req.cwd.c_str()) != 0) {
             // cwd 失效时退回根目录（与 yl-ai 行为一致），不让进程裸死。
-            chdir("/");
+            if (chdir("/") != 0) { /* 忽略：保持当前目录 */ }
         }
 
         std::vector<char*> argv;

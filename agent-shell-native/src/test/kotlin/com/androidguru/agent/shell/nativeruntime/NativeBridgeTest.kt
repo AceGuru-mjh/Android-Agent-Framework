@@ -60,13 +60,24 @@ class NativeBridgeTest {
 
         val channel = NativePtyChannel(handle.masterFd, handle.pid)
         channel.use { pty ->
+            // 读到进程退出为止（对部分到达免疫），再读尽内核尾部缓冲
             val out = StringBuilder()
             val buf = ByteArray(4096)
-            var spins = 0
-            while (spins++ < 300 && !out.contains("AGSH_NATIVE_OK")) {
+            while (true) {
                 val n = pty.read(buf)
                 if (n > 0) out.append(String(buf, 0, n, Charsets.UTF_8))
-                pty.waitFor(10)
+                val code = pty.waitFor(50)
+                if (code != -2) break // 进程已退出（或未知）
+                if (n == -1) break    // EOF
+            }
+            // 退出后内核缓冲里通常还有尾巴，读尽（容错若干轮）
+            repeat(4) {
+                while (true) {
+                    val n = pty.read(buf)
+                    if (n <= 0) break
+                    out.append(String(buf, 0, n, Charsets.UTF_8))
+                }
+                Thread.sleep(20)
             }
             // PTY 行规程 ONLCR：输出带 \r\n（证明这是真 PTY 而非管道）
             assertTrue("应读到输出: $out", out.contains("AGSH_NATIVE_OK"))
