@@ -43,11 +43,27 @@ jobs:
           fi
           echo "标题长度 $LEN ✅"
 
+      # 注意：GitHub Actions 表达式的宽松相等把 null == false 判为 true，
+      # 而 PR 刚创建时 event payload 的 mergeable 恰为 null（后台尚未算完）——
+      # 因此必须走 API 实时查询，只有明确的 false 才判冲突。
       - name: Merge conflict check
-        if: ${{ github.event.pull_request.mergeable == false }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          echo "::error title=存在合并冲突::请先 rebase / merge main 分支"
-          exit 1
+          for attempt in 1 2 3 4 5; do
+            MERGEABLE=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
+              "https://api.github.com/repos/${{ github.repository }}/pulls/$PR_NUMBER" \
+              | python3 -c "import json,sys; print(json.load(sys.stdin).get('mergeable'))")
+            echo "attempt $attempt: mergeable=$MERGEABLE"
+            if [ "$MERGEABLE" != "None" ]; then break; fi
+            sleep 5   # 后台还在计算，稍候重试
+          done
+          if [ "$MERGEABLE" = "False" ]; then
+            echo "::error title=存在合并冲突::请先 rebase / merge main 分支"
+            exit 1
+          fi
+          echo "无合并冲突 ✅"
 
       - name: Diff stats (informational)
         run: |
