@@ -32,6 +32,7 @@
 | `agent-shell-native` | **C++17 原生增强层**（PR #5）：forkpty 真 PTY 通道（NativeProcessChannelFactory）、ANSI 批量清洗、ELF64 补丁（RUNPATH/SONAME），不可用时优雅回退纯 JVM | [NATIVE_GUIDE.md](docs/NATIVE_GUIDE.md) |
 | `agent-tasks` | **长程任务系统**（PR #22）：TaskPlan 计划状态机（rewrite/patch 双模式）、每轮计划状态注入、进度观察、文件持久化 + `LongTaskAgent` 装配门面 | [LONG_TASK_GUIDE.md](docs/LONG_TASK_GUIDE.md) |
 | `agent-memory` | **长期记忆系统**（PR #24）：三层记忆架构（工作/情景/语义）、四因子相关性召回每轮注入、memory_save/search/forget 三件套工具、会话结束抽取（LLM + 启发式回退 + 去重）、压缩时捕获被裁对话、`MemorySystem` 装配门面 | [MEMORY_GUIDE.md](docs/MEMORY_GUIDE.md) |
+| `agent-workflow` | **工作流系统**（PR #25）：参数化声明式工作流（DAG + 条件分支 + 回边循环）、超步调度引擎（节点级重试/超时/失败三态处置/human-in-loop/崩溃恢复/熔断护栏）、工作流库（候选→激活→熔断生命周期 + 执行统计）、会话蒸馏学习（LLM 泛化 + 宏录制回退）、工具五件套 + 建议注入、`WorkflowSystem` 装配门面 | [WORKFLOW_GUIDE.md](docs/WORKFLOW_GUIDE.md) |
 | `examples/simple-agent` | 最小可运行示例：控制台对话 Agent（含插件演示） | [GETTING_STARTED.md](docs/GETTING_STARTED.md) |
 | `examples/terminal-agent` | 终端 Agent 示例：ShellToolSet 全套接入 + 原生 PTY 自动探测 + 控制台审批 | [SHELL_GUIDE.md](docs/SHELL_GUIDE.md) |
 | `examples/long-task-agent` | 长程任务示例：计划进度条 + 预算续跑确认 + `--resume` 崩溃恢复 | [LONG_TASK_GUIDE.md](docs/LONG_TASK_GUIDE.md) |
@@ -78,6 +79,7 @@ export AGENT_MODEL="deepseek-chat"
 ## 设计原则（继承自 Android-Guru-Agent）
 
 1. **纯 JVM 内核** — 全部模块零平台依赖，Android 特性只在宿主接入层出现。
+2. **确定性骨架 × 学习型血肉** — 工作流是可验证的确定性骨架（模板形参 / 路由持久化 / 崩溃恢复），蒸馏与记忆是学习型血肉；骨架可审计、血肉可淘汰（执行统计驱动的生命周期）。
 2. **事件流驱动** — 引擎对外只暴露 `Flow<AgentEvent>`，UI / 日志 / 遥测按需订阅。
 3. **注入式扩展** — 模式差异走 system prompt 注入，能力差异走工具注册，引擎主循环只有一份。
 4. **生产级韧性** — 熔断器、确定性退避、限流、schema 校验、悬空 tool-call 修补、空响应重试、相同调用循环护栏，全部内建。
@@ -126,8 +128,10 @@ CI 产出的成品库在 Actions → Artifacts 下载。
 - [x] **PR #3** — 插件系统重做 + 示例 + 发布工作流（agent-plugin / examples / release）
 - [x] **PR #4** — 终端能力整体移植：agent-shell / agent-shell-tools（自 yl-ai 移植重写，修复哨兵协议缺陷）
 - [x] **PR #5** — C++17 原生增强层（agent-shell-native）+ PRoot RUNPATH 自动清空 + CI 全面编译验证（JVM 矩阵 / C++ host / NDK 交叉编译）+ PR 门禁（pr-check.yml）
-- [ ] **PR #23** — yl-ai 全量融合收尾 + 全线加固：Termux 环境（agent-shell/termux + termux_exec 工具）、聊天层（agent-chat）、控制 API 自检器、设置存储（SecretVault 首个消费者）、LLM 细节（cachedTokens / normalizeEndpoint / 8 家预设 / 自带工具注入）；**23 项 bug 修复**（issues #8–#21：PTY 回显哨兵锚定、写入通道门控、熔断探测槽泄漏、UTF-8 跨 chunk、审计取旧、策略绕过、RFC 6455 合规等）
-- [ ] **PR #24** — 长期记忆系统 + 基础能力补强：新模块 agent-memory（三层记忆：召回注入 / 记忆三件套工具 / 会话抽取 / 压缩捕获 / MemorySystem 门面）、agent-core CompositeContextProvider 组合缝、LongTaskAgent extraContextProviders、审批授权跨会话存续（FileApprovalDecisionStore + TTL，opt-in）
+- [x] **PR #23** — yl-ai 全量融合收尾 + 全线加固：Termux 环境（agent-shell/termux + termux_exec 工具）、聊天层（agent-chat）、控制 API 自检器、设置存储（SecretVault 首个消费者）、LLM 细节（cachedTokens / normalizeEndpoint / 8 家预设 / 自带工具注入）；**23 项 bug 修复**（issues #8–#21：PTY 回显哨兵锚定、写入通道门控、熔断探测槽泄漏、UTF-8 跨 chunk、审计取旧、策略绕过、RFC 6455 合规等）
+- [x] **PR #24** — 长期记忆系统 + 基础能力补强：新模块 agent-memory（三层记忆：召回注入 / 记忆三件套工具 / 会话抽取 / 压缩捕获 / MemorySystem 门面）、agent-core CompositeContextProvider 组合缝、LongTaskAgent extraContextProviders、审批授权跨会话存续（FileApprovalDecisionStore + TTL，opt-in）
+
+- [ ] **PR #25** — 工作流系统：新模块 agent-workflow（参数化工作流定义 + ${} 模板形参 / 超步 DAG 调度 / Tarjan 回边循环重入 / 节点级退避重试 / 失败三态处置 / human-in-loop / 持久化运行态崩溃恢复 / maxSteps 熔断）、工作流库（CANDIDATE→ACTIVE 晋升 + 连败自动熔断 + 执行统计）、WorkflowExtractor 蒸馏学习（LLM 泛化纪律 + 宏录制零依赖回退）、run/list/read/save/disable 工具五件套 + WorkflowSuggester 两阶段披露注入、examples/workflow-agent 确定性演示
 
 ## License
 
