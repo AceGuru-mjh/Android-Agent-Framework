@@ -139,4 +139,3 @@ jniLibs），进程边界清晰（GPL「聚合分发」路线，与 yl-ai 的合
 - 本 PR 端到端验证 pr-check.yml 门禁：PR 元数据校验 + JVM 矩阵（JDK 17/21）+ C++ host 编译测试 + NDK arm64-v8a 交叉编译 + PR Check Gate 聚合门禁
 - 验证分支保护 required status checks 生效
 
-<!-- 负面测试：验证 required checks 未完成时 merge 被拒 -->
