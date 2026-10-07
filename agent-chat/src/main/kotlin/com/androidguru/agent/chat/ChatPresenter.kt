@@ -170,6 +170,28 @@ class ChatPresenter(
                     )
                 }
 
+            // PR #26 反思纠错：过程提示（INFO 注，回合继续）
+            is AgentEvent.ReflectionTriggered ->
+                update { list ->
+                    ChatReducer.note(
+                        list,
+                        "已触发反思（${event.triggerReason}），策略修正：${event.lesson}",
+                        ChatItem.Level.INFO,
+                        clock(),
+                    )
+                }
+
+            // PR #26 跑偏检测：过程提示（WARN 注，回合继续）
+            is AgentEvent.DriftSuspected ->
+                update { list ->
+                    ChatReducer.note(
+                        list,
+                        "疑似跑偏（${event.reason}），已注入拉回提示。",
+                        ChatItem.Level.WARN,
+                        clock(),
+                    )
+                }
+
             // 过程事件：不出卡片（理由见类 KDoc）
             is AgentEvent.IterationStart,
             is AgentEvent.ThinkingChunk,

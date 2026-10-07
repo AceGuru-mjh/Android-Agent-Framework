@@ -103,6 +103,8 @@ private fun render(event: AgentEvent) {
         is AgentEvent.ToolCallComplete -> println(if (event.result.ok) " ✓" else " ✗ ${event.result.content.take(120)}")
         is AgentEvent.IterationStart -> if (event.iteration % 5 == 0) println("\n--- 第 ${event.iteration} 轮 ---")
         is AgentEvent.LoopDetected -> println("\n⚠ 循环护栏：${event.toolName} 相同调用已 ${event.repeatedCount} 次，已注入策略建议")
+        is AgentEvent.ReflectionTriggered -> println("\n🪞 反思（${event.triggerReason}）：${event.lesson}")
+        is AgentEvent.DriftSuspected -> println("\n🧭 跑偏检测（${event.reason}）：${event.advisory.take(80)}…")
         is AgentEvent.BudgetExhausted -> Unit // 外层处理
         is AgentEvent.UserInputRequired -> Unit // 外层处理
         is AgentEvent.Error -> println("\n[错误] ${event.message}")
