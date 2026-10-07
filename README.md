@@ -14,7 +14,8 @@
 - **终端执行能力**（PR #4，自 [yl-ai](https://github.com/iill392/yl-ai) 移植重写）：共享终端会话、哨兵执行、风险分级与审批闸门、后台作业、Alpine 容器（PRoot）、本地控制 API、审计。
 - **C++17 原生增强层**（PR #5）：forkpty 真 PTY 通道、ANSI 批量清洗、ELF64 补丁 —— 不可用时优雅回退纯 JVM，框架主体仍零平台依赖。
 - **长程任务能力**（PR #22）：任务计划（todo 状态机 + 每轮注入）、迭代预算续跑、相同调用循环护栏、崩溃恢复（计划与会话双持久化）。
-- **克制**：不含原项目中的设备工具集、认知记忆等业务高级功能；连接器体系不复用，插件与 MCP 全新重做。
+- **长期记忆能力**（PR #24）：跨会话三层记忆（工作/情景/语义）—— 每轮相关性召回注入、记忆三件套工具、会话结束抽取（LLM + 启发式回退）、压缩时捕获被裁对话、审批授权跨会话存续（opt-in + TTL）。
+- **克制**：不含原项目中的设备工具集等业务高级功能；连接器体系不复用，插件与 MCP 全新重做。
 
 ## 模块总览
 
@@ -30,9 +31,11 @@
 | `agent-shell-tools` | **全新移植**的终端工具集：20 个正交 AgentTool、审批/审计钩子、系统提示词构建器、平台能力 SPI | [SHELL_GUIDE.md](docs/SHELL_GUIDE.md) |
 | `agent-shell-native` | **C++17 原生增强层**（PR #5）：forkpty 真 PTY 通道（NativeProcessChannelFactory）、ANSI 批量清洗、ELF64 补丁（RUNPATH/SONAME），不可用时优雅回退纯 JVM | [NATIVE_GUIDE.md](docs/NATIVE_GUIDE.md) |
 | `agent-tasks` | **长程任务系统**（PR #22）：TaskPlan 计划状态机（rewrite/patch 双模式）、每轮计划状态注入、进度观察、文件持久化 + `LongTaskAgent` 装配门面 | [LONG_TASK_GUIDE.md](docs/LONG_TASK_GUIDE.md) |
+| `agent-memory` | **长期记忆系统**（PR #24）：三层记忆架构（工作/情景/语义）、四因子相关性召回每轮注入、memory_save/search/forget 三件套工具、会话结束抽取（LLM + 启发式回退 + 去重）、压缩时捕获被裁对话、`MemorySystem` 装配门面 | [MEMORY_GUIDE.md](docs/MEMORY_GUIDE.md) |
 | `examples/simple-agent` | 最小可运行示例：控制台对话 Agent（含插件演示） | [GETTING_STARTED.md](docs/GETTING_STARTED.md) |
 | `examples/terminal-agent` | 终端 Agent 示例：ShellToolSet 全套接入 + 原生 PTY 自动探测 + 控制台审批 | [SHELL_GUIDE.md](docs/SHELL_GUIDE.md) |
 | `examples/long-task-agent` | 长程任务示例：计划进度条 + 预算续跑确认 + `--resume` 崩溃恢复 | [LONG_TASK_GUIDE.md](docs/LONG_TASK_GUIDE.md) |
+| `examples/memory-agent` | 长期记忆示例：跨会话召回闭环演示（`--demo` 双脚本会话，无需 API Key） | [MEMORY_GUIDE.md](docs/MEMORY_GUIDE.md) |
 
 ## 快速上手
 
@@ -79,7 +82,8 @@ export AGENT_MODEL="deepseek-chat"
 3. **注入式扩展** — 模式差异走 system prompt 注入，能力差异走工具注册，引擎主循环只有一份。
 4. **生产级韧性** — 熔断器、确定性退避、限流、schema 校验、悬空 tool-call 修补、空响应重试、相同调用循环护栏，全部内建。
 5. **长程任务一等公民** — 任务计划每轮注入、迭代预算续跑、崩溃恢复（对话 + 计划双持久化）；任务能跨预算边界、跨进程生命周期继续。
-6. **协议严谨** — MCP 严格遵循 JSON-RPC 2.0 与 MCP 规范（2024-11-05），握手 / 分页 / 会话头 / 错误码完整实现，且有服务端 ↔ 客户端端到端测试背书。
+6. **记忆分层** — 工作记忆（会话内消息流）、情景记忆（会话摘要 / 压缩捕获）、语义记忆（事实 / 偏好 / 教训）各司其职；自动召回与模型主动读写双通道；过时记忆可纠正（forget 是一等能力）。
+7. **协议严谨** — MCP 严格遵循 JSON-RPC 2.0 与 MCP 规范（2024-11-05），握手 / 分页 / 会话头 / 错误码完整实现，且有服务端 ↔ 客户端端到端测试背书。
 
 ## 从原项目提取了什么、剔除了什么
 
@@ -95,7 +99,7 @@ export AGENT_MODEL="deepseek-chat"
 
 **剔除（app 业务层，不进框架）**
 - 821 行中文系统提示词、SmallTalk/PromiseDetector、终端顾问、技能市场
-- 设备工具集（111 个内置工具）、终端仿真、认知记忆 cs-mem、三级权限链
+- 设备工具集（111 个内置工具）、终端仿真、认知记忆 cs-mem（app 业务实现；框架级记忆能力由 agent-memory 重新设计，见 [MEMORY_GUIDE.md](docs/MEMORY_GUIDE.md)）、三级权限链
 - 连接器体系（不复用）
 
 ## 构建
@@ -123,6 +127,7 @@ CI 产出的成品库在 Actions → Artifacts 下载。
 - [x] **PR #4** — 终端能力整体移植：agent-shell / agent-shell-tools（自 yl-ai 移植重写，修复哨兵协议缺陷）
 - [x] **PR #5** — C++17 原生增强层（agent-shell-native）+ PRoot RUNPATH 自动清空 + CI 全面编译验证（JVM 矩阵 / C++ host / NDK 交叉编译）+ PR 门禁（pr-check.yml）
 - [ ] **PR #23** — yl-ai 全量融合收尾 + 全线加固：Termux 环境（agent-shell/termux + termux_exec 工具）、聊天层（agent-chat）、控制 API 自检器、设置存储（SecretVault 首个消费者）、LLM 细节（cachedTokens / normalizeEndpoint / 8 家预设 / 自带工具注入）；**23 项 bug 修复**（issues #8–#21：PTY 回显哨兵锚定、写入通道门控、熔断探测槽泄漏、UTF-8 跨 chunk、审计取旧、策略绕过、RFC 6455 合规等）
+- [ ] **PR #24** — 长期记忆系统 + 基础能力补强：新模块 agent-memory（三层记忆：召回注入 / 记忆三件套工具 / 会话抽取 / 压缩捕获 / MemorySystem 门面）、agent-core CompositeContextProvider 组合缝、LongTaskAgent extraContextProviders、审批授权跨会话存续（FileApprovalDecisionStore + TTL，opt-in）
 
 ## License
 

@@ -256,6 +256,27 @@ val engine = DefaultAgentEngine(
 
 提供者异常被引擎隔离（记为空上下文），单点故障不打断任务。
 
+### 组合多个注入器（如：计划 + 长期记忆）
+
+`extraContextProviders` 把宿主注入器（如 agent-memory 的记忆召回）与计划注入组合 ——
+内部经 `CompositeContextProvider`（agent-core）拼接，单点异常隔离、顺序稳定：
+
+```kotlin
+val memory = MemorySystem.create(workspace, llmClient)
+val conversation = FileConversationMemory(workspace.resolve("sessions/report.jsonl"))
+
+val agent = LongTaskAgent(
+    llmClient = llm,
+    sessionId = "report-2024",
+    memory = conversation,
+    extraTools = memory.tools,                                                // 记忆工具与 task_plan 共存
+    extraContextProviders = listOf(memory.contextInjectorFor(conversation)),  // 每轮记忆召回
+    compressor = memory.capturingCompressor(SlidingWindowCompressor()),       // 压缩时捕获被裁对话
+)
+```
+
+完整记忆系统见 **[MEMORY_GUIDE.md](MEMORY_GUIDE.md)**。
+
 ---
 
 ## 六、配置速查

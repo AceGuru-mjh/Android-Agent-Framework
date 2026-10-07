@@ -1,11 +1,13 @@
 package com.androidguru.agent.tasks.engine
 
+import com.androidguru.agent.core.context.CompositeContextProvider
 import com.androidguru.agent.core.context.ContextCompressor
 import com.androidguru.agent.core.context.SlidingWindowCompressor
 import com.androidguru.agent.core.engine.AgentConfig
 import com.androidguru.agent.core.engine.AgentEngine
 import com.androidguru.agent.core.engine.AgentEvent
 import com.androidguru.agent.core.engine.DefaultAgentEngine
+import com.androidguru.agent.core.engine.SystemContextProvider
 import com.androidguru.agent.core.engine.UserInput
 import com.androidguru.agent.core.session.ConversationMemory
 import com.androidguru.agent.core.session.FileConversationMemory
@@ -34,7 +36,10 @@ import java.nio.file.Path
  * 3. [PlanContextInjector] 接入引擎动态上下文缝（计划状态每轮注入）；
  * 4. 计划持久化（[TaskPlanStore]）+ 会话持久化（[ConversationMemory]）——
  *    两者均用文件实现时即获得**跨进程恢复**能力；
- * 5. 宿主业务工具经 [extraTools] 注入，与计划工具共存。
+ * 5. 宿主业务工具经 [extraTools] 注入，与计划工具共存；
+ * 6. 宿主可叠加更多动态上下文注入器（[extraContextProviders]，如
+ *    agent-memory 的 MemoryContextInjector）—— 经 CompositeContextProvider
+ *    与计划注入组合，单点异常隔离。
  *
  * 最小用法：
  *
@@ -69,6 +74,8 @@ class LongTaskAgent(
     memory: ConversationMemory = InMemoryConversationMemory(),
     /** 宿主业务工具（与 task_plan 共存于同一注册表）。 */
     extraTools: List<AgentTool> = emptyList(),
+    /** 额外动态上下文注入器（如 agent-memory 的记忆召回）；与计划注入组合且互不感知。 */
+    extraContextProviders: List<SystemContextProvider> = emptyList(),
     compressor: ContextCompressor = SlidingWindowCompressor(),
     hooks: HookRegistry = HookRegistry(),
     /** 同一时刻只允许一个任务 in_progress（默认开）。 */
@@ -107,6 +114,14 @@ class LongTaskAgent(
 
     private val executor = DefaultToolExecutor(registry, hooks)
 
+    /** 动态上下文：计划注入 + 宿主额外注入器（组合缝，单点异常隔离）。 */
+    private val contextProvider: SystemContextProvider =
+        if (extraContextProviders.isEmpty()) {
+            PlanContextInjector(planManager)
+        } else {
+            CompositeContextProvider(listOf(PlanContextInjector(planManager)) + extraContextProviders)
+        }
+
     private val engine: DefaultAgentEngine = DefaultAgentEngine(
         llmClient = llmClient,
         toolRegistry = registry,
@@ -116,7 +131,7 @@ class LongTaskAgent(
         compressor = compressor,
         hooks = hooks,
         sessionId = sessionId,
-        systemContextProvider = PlanContextInjector(planManager),
+        systemContextProvider = contextProvider,
     )
 
     /** 暴露底层引擎（宿主需要 patchConfig / updateConfig / submitUserInput 时使用）。 */

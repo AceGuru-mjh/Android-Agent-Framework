@@ -22,6 +22,7 @@ rootProject.name = "android-agent-framework"
 //   PR5 → :agent-shell-native（C++17 原生增强层：forkpty PTY / ANSI 清洗 / ELF64 补丁）
 //   PR #22 → :agent-tasks / :examples:long-task-agent（长程任务：计划 / 续跑 / 循环护栏 / 崩溃恢复）
 //   PR #23 → :agent-chat（聊天层：卡片模型 / 历史持久化 / 事件→卡片转译）
+//   PR #24 → :agent-memory / :examples:memory-agent（长期记忆：召回注入 / 记忆工具 / 会话抽取 / 压缩捕获）
 include(":agent-core")
 include(":agent-tools")
 include(":agent-llm")
@@ -32,6 +33,8 @@ include(":agent-shell")
 include(":agent-shell-tools")
 include(":agent-shell-native")
 include(":agent-tasks")
+include(":agent-memory")
 include(":examples:simple-agent")
 include(":examples:terminal-agent")
 include(":examples:long-task-agent")
+include(":examples:memory-agent")

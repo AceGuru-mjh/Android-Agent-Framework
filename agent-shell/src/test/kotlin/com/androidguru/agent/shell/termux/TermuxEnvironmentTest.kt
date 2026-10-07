@@ -62,9 +62,13 @@ class TermuxEnvironmentTest {
             // 官方包的链接清单：zip 内对应条目是空文件，链接信息全在这一行行文本里
             "SYMLINKS.txt" to "dash←./bin/sh\n".toByteArray(),
         )
+        // 固定时间戳：ZipEntry 默认取当前时间（DOS 格式 2 秒粒度），两次构造跨边界时
+        // 字节不同 → SHA256 不同 → install 对不上 catalog 哈希（CI 上已实际偶发）。
+        // 固定后任何两个假 zip 字节级一致，跨用例哈希恒匹配。
+        val fixedTime = 1_700_000_000_000L
         ZipOutputStream(FileOutputStream(zip)).use { zos ->
             entries.forEach { (name, bytes) ->
-                zos.putNextEntry(ZipEntry(name))
+                zos.putNextEntry(ZipEntry(name).apply { time = fixedTime })
                 zos.write(bytes)
                 zos.closeEntry()
             }
