@@ -43,7 +43,7 @@ class ShellApprovalHook(
         if (event !is HookEvent.PreToolUse) return HookDecision.Proceed
 
         when (event.toolId) {
-            "terminal_exec", "container_exec", "job_start" -> {
+            "terminal_exec", "container_exec", "termux_exec", "job_start" -> {
                 val command = JsonArgs.parse(event.arguments).str("command")?.trim()
                     ?: return HookDecision.Proceed
                 return gateCommand(event.toolId, command)

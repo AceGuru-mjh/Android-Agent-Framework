@@ -16,15 +16,15 @@ class ShellToolSetTest {
         ShellRuntime.create(base)
 
     @Test
-    fun `注册19个工具_id唯一`() {
+    fun `注册20个工具_id唯一`() {
         val base = java.nio.file.Files.createTempDirectory("agsh-tools").toFile()
         try {
             val set = ShellToolSet(runtime(base))
             val registry = DefaultToolRegistry()
             set.installInto(registry)
-            assertEquals(19, registry.size)
-            assertEquals(19, ShellToolSet.ToolIds.ALL.size)
-            assertEquals(19, registry.getAllTools().map { it.id }.distinct().size)
+            assertEquals(20, registry.size)
+            assertEquals(20, ShellToolSet.ToolIds.ALL.size)
+            assertEquals(20, registry.getAllTools().map { it.id }.distinct().size)
         } finally {
             base.deleteRecursively()
         }

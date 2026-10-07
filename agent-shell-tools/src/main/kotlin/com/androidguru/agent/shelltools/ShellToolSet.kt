@@ -57,6 +57,7 @@ class ShellToolSet(
         const val FILE_DELETE = "file_delete"
         const val HTTP_GET = "http_get"
         const val CONTAINER_EXEC = "container_exec"
+        const val TERMUX_EXEC = "termux_exec"
         const val APP_LIST = "app_list"
         const val APP_LAUNCH = "app_launch"
         const val OPEN_URL = "open_url"
@@ -71,9 +72,9 @@ class ShellToolSet(
 
         val ALL = listOf(
             TERMINAL_EXEC, TERMINAL_WRITE, FS_READ, FS_WRITE, FS_LIST, FILE_DELETE,
-            HTTP_GET, CONTAINER_EXEC, APP_LIST, APP_LAUNCH, OPEN_URL, DEVICE_INFO,
-            CLIPBOARD_READ, CLIPBOARD_WRITE, JOB_START, JOB_LIST, JOB_GET, JOB_STOP,
-            TASK_FINISH,
+            HTTP_GET, CONTAINER_EXEC, TERMUX_EXEC, APP_LIST, APP_LAUNCH, OPEN_URL,
+            DEVICE_INFO, CLIPBOARD_READ, CLIPBOARD_WRITE, JOB_START, JOB_LIST,
+            JOB_GET, JOB_STOP, TASK_FINISH,
         )
     }
 
@@ -82,6 +83,7 @@ class ShellToolSet(
         TerminalTools.terminalExec(runtime, defaultTimeoutMs),
         TerminalTools.terminalWrite(runtime),
         TerminalTools.containerExec(runtime),
+        TerminalTools.termuxExec(runtime),
         FsTools.read(runtime),
         FsTools.write(runtime),
         FsTools.list(runtime),
@@ -112,6 +114,7 @@ class ShellToolSet(
         ToolIds.TERMINAL_EXEC to ToolRunPolicy.LONG.copy(timeoutMs = 320_000L),
         ToolIds.TERMINAL_WRITE to ToolRunPolicy(timeoutMs = 15_000L),
         ToolIds.CONTAINER_EXEC to ToolRunPolicy(timeoutMs = 620_000L, retryDelaysMs = listOf(2_000L)),
+        ToolIds.TERMUX_EXEC to ToolRunPolicy(timeoutMs = 620_000L, retryDelaysMs = listOf(2_000L)),
         ToolIds.FS_READ to ToolRunPolicy.QUICK,
         ToolIds.FS_WRITE to ToolRunPolicy.QUICK,
         ToolIds.FS_LIST to ToolRunPolicy.QUICK,

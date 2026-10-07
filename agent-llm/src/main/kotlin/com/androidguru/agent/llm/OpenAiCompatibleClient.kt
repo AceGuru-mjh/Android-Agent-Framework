@@ -39,6 +39,9 @@ import kotlin.coroutines.resumeWithException
  *
  * 生产级细节（继承自 Android-Guru-Agent 踩坑经验）：
  * - SSE 解析兼容 `data:` / `data: ` 两种前缀，`[DONE]` 终止；
+ * - Base URL 自动归一化（[normalizeEndpoint]）：填域名也会补 /v1，DeepSeek 等官方
+ *   base 不带 /v1 的端点不再 404；
+ * - HTTP 错误附中文诊断（[describeHttpError]），LlmException 结构不变；
  * - 取消立即中断阻塞读：注册 invokeOnCompletion 关闭 response，socket 关闭使 readLine 抛 IOException；
  * - 流式工具调用以 **index 为复合键** 累积（OpenAI 并行工具调用的后续片段只带 index 不带 id）；
  * - 流尾 usage 统计帧（choices 为空但 usage 非空）先提取再判空；
@@ -70,7 +73,7 @@ class OpenAiCompatibleClient(private val config: LlmConfig) : LlmClient {
         val response = post(body)
         response.use { resp ->
             val text = resp.body?.string()
-            if (!resp.isSuccessful) throw LlmException.Http(resp.code, text)
+            if (!resp.isSuccessful) throw LlmException.Http(resp.code, describeHttpError(resp.code, text))
             if (text.isNullOrBlank()) throw LlmException.EmptyResponse
             val root = try {
                 json.parseToJsonElement(text).jsonObject
@@ -95,7 +98,7 @@ class OpenAiCompatibleClient(private val config: LlmConfig) : LlmClient {
         try {
             if (!response.isSuccessful) {
                 val errBody = response.body?.string()
-                throw LlmException.Http(response.code, errBody)
+                throw LlmException.Http(response.code, describeHttpError(response.code, errBody))
             }
             val source = response.body?.source() ?: throw LlmException.EmptyResponse
 
@@ -355,12 +358,16 @@ class OpenAiCompatibleClient(private val config: LlmConfig) : LlmClient {
         return LlmResponse(content = content, reasoning = reasoning, toolCalls = toolCalls, usage = usage)
     }
 
-    private fun parseUsage(el: JsonElement): Usage? {
+    internal fun parseUsage(el: JsonElement): Usage? {
         val obj = el as? JsonObject ?: return null
         val prompt = (obj["prompt_tokens"] as? JsonPrimitive)?.longOrNull ?: 0L
         val completion = (obj["completion_tokens"] as? JsonPrimitive)?.longOrNull ?: 0L
         val total = (obj["total_tokens"] as? JsonPrimitive)?.longOrNull ?: (prompt + completion)
-        return Usage(prompt, completion, total)
+        // yl-ai 对齐（I 组缺口）：DeepSeek / OpenAI 等在 prompt_tokens_details 里
+        // 上报命中上下文缓存的 prompt tokens；未上报时保持 null（区别于 0）
+        val cached = (obj["prompt_tokens_details"] as? JsonObject)
+            ?.let { (it["cached_tokens"] as? JsonPrimitive)?.longOrNull }
+        return Usage(prompt, completion, total, cached)
     }
 
     // ------------------------------------------------------------------
@@ -368,7 +375,7 @@ class OpenAiCompatibleClient(private val config: LlmConfig) : LlmClient {
     // ------------------------------------------------------------------
 
     private suspend fun post(body: JsonObject): Response {
-        val url = "${config.baseUrl.trimEnd('/')}/chat/completions"
+        val url = normalizeEndpoint(config.baseUrl) + "/chat/completions"
         val requestBuilder = Request.Builder()
             .url(url)
             .post(body.toString().toRequestBody("application/json".toMediaType()))
@@ -393,4 +400,51 @@ class OpenAiCompatibleClient(private val config: LlmConfig) : LlmClient {
         }
     }
 
+}
+
+/** OpenAI 兼容路径后缀（用户可能把整个补全路径填进 baseUrl，需先剥掉再拼）。 */
+private const val COMPLETIONS_SUFFIX = "/chat/completions"
+
+/** 版本化 base 段：/v1、/v2、/v4…（智谱 GLM 是 /api/paas/v4，不能误补 /v1）。 */
+private val VERSIONED_BASE = Regex("/v\\d+$")
+
+/**
+ * Base URL 归一化（yl-ai `normalizeEndpoint` 的移植，I 组缺口）。
+ *
+ * 规则（KDoc 即规格）：
+ * 1. 以 `/chat/completions` 结尾 → 剥掉后缀（旧版框架要求 baseUrl 精确到补全路径，
+ *    老配置直填全路径必须继续可用；post 时会再拼回）；
+ * 2. 以版本段 `/v1`（或其它 `/vN`）结尾 → 原样保留（yl-ai 只认 /v1；这里泛化为
+ *    /vN 以兼容智谱 GLM 的 /api/paas/v4 预设，否则会被错误补成 /v4/v1）；
+ * 3. 其余（如 `https://api.deepseek.com`）→ 补 `/v1`。
+ *
+ * post 的最终 URL 恒为 `normalizeEndpoint(baseUrl) + "/chat/completions"`：
+ * 用户填 `https://api.deepseek.com` 不再 404，填到 /v1 或全路径的老配置不受影响。
+ * 首尾空白与尾斜杠一律容忍。
+ */
+internal fun normalizeEndpoint(raw: String): String {
+    val trimmed = raw.trim().trimEnd('/')
+    return when {
+        trimmed.endsWith(COMPLETIONS_SUFFIX) -> trimmed.removeSuffix(COMPLETIONS_SUFFIX)
+        VERSIONED_BASE.containsMatchIn(trimmed) -> trimmed
+        else -> "$trimmed/v1"
+    }
+}
+
+/**
+ * HTTP 错误的中文诊断文案（yl-ai `describeHttpError` 的等价移植，I 组缺口）。
+ *
+ * 保持 [LlmException] 结构不变：仅把「中文提示 + 服务端原始错误摘要」拼进
+ * [LlmException.Http.body]（message 随之可读），statusCode 原样保留 ——
+ * [LlmException.isTransient] 的重试判定不受影响。
+ */
+internal fun describeHttpError(status: Int, body: String?): String {
+    val brief = body?.take(400)?.replace("\n", " ").orEmpty()
+    return when (status) {
+        401, 403 -> "鉴权失败（$status）：请检查 API Key 是否正确、是否有该模型的权限。$brief"
+        404 -> "接口地址不存在（404）：请检查 Base URL 是否填写正确（通常以 /v1 结尾）。$brief"
+        429 -> "触发限流（429）：请求过于频繁或额度用尽。$brief"
+        in 500..599 -> "服务端错误（$status）：模型服务暂时不可用，可稍后重试。$brief"
+        else -> "请求失败（$status）：$brief"
+    }
 }

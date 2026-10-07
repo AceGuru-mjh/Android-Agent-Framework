@@ -115,15 +115,16 @@ printf '__AGSH_<id>_END__:%s\n' "$__agsh_rc"   # ④ END 标记携带退出码
 - 本模块填补了框架的一个缺口：`ToolRisk.HIGH` 的 KDoc 声明「HIGH 风险工具默认需要
   会话级确认」，此前只有声明没有实现。
 
-## 5. 工具清单（19 个，与 yl-ai 同名）
+## 5. 工具清单（20 个，与 yl-ai 同名）
 
 | 工具 | 能力 | 安全 |
 |---|---|---|
 | `terminal_exec` | 共享终端执行命令，取退出码与输出 | CommandPolicy + 审批 |
-| `terminal_write` | 向终端写原始输入（应答交互式程序） | 审批（自动放行可配） |
+| `terminal_write` | 向终端写原始输入（应答交互式程序）；行级 WriteGate 扫描（issue #9） | BLOCKED 拦截 / 命令形态引导走 exec |
 | `container_exec` | Alpine 容器内执行（root + apk） | CommandPolicy + 审批 |
+| `termux_exec` | Termux 环境内一次性执行（apt / bash 工具链，启动开销比容器低） | CommandPolicy + 审批 |
 | `fs_read` / `fs_list` | 读文件 / 列目录 | 只读 |
-| `fs_write` | 写文件（覆盖/追加） | 恒需审批（带内容摘要） |
+| `fs_write` | 写文件（覆盖/追加）；「本次都允许」记忆键 = 完整路径（issue #17） | 恒需审批（带内容摘要） |
 | `file_delete` | 删除 —— 实际**移入回收目录**，可恢复 | 恒需审批 + 路径边界 |
 | `http_get` | 抓取网页 / API（HTML 转纯文本） | 只读 |
 | `app_list` / `app_launch` / `open_url` | 设备应用能力（DeviceTools SPI） | 宿主决定 |
@@ -165,6 +166,34 @@ runtime.container.diagnose()
 
 容器 `/root` 映射宿主可写目录 —— 容器内外文件互通。
 
+## 7.5 Termux 环境（补齐 yl-ai 里程碑 2）
+
+yl-ai 的里程碑 2 修通了 Termux 执行链（bash 5.3 + apt / dpkg），本框架把整条链路移植为纯 JVM：
+
+```kotlin
+// 安装：多镜像回退 + 官方 SHA256 锚定 + ZipEntry 内容判别符号链接 + SYMLINKS.txt 恢复
+runtime.termux.install { progress -> ... }
+// 完整性校验 / 诊断 / 卸载
+runtime.termux.verify() ; runtime.termux.diagnose() ; runtime.termux.uninstall()
+// 会话（proot 自映射方案：-r / + termux 目录自映射，路径与官方 Termux 完全一致）
+runtime.createTermuxSession()          // 登录 shell（引导脚本自动 source）
+runtime.termuxLauncher.runShellCommand("uname -a")   // 一次性命令
+termux_exec 工具                       // AI 侧入口（未安装时返回安装指引）
+```
+
+工程要点（全部来自 yl-ai 真机踩坑，KDoc 里有完整叙述）：
+
+- **ZipEntry 内容判别符号链接**：`ZipInputStream` 拿不到 unix 模式位 ——
+  用「ELF 魔数 / `#!` / 含 NUL」三判据证明是真身，剩下的短单行路径文本判为链接；
+- **SYMLINKS.txt 恢复规则**（DEVLOG 8.7 连错两次的教训）：链接名相对 `$PREFIX`、
+  目标相对链接所在目录（兄弟节点）；清单文件本身必须落为普通文件；
+- **proot 自映射**：`-r / -b <filesDir>/termux:/data/data/com.termux/files` ——
+  环境内 `$PREFIX` 硬编码路径无需改写，与官方 Termux 完全一致；
+- **六级逐级诊断**（`diagnoseLadder()`）：文件级检查静态判定，只在真正需要时启动通道；
+- `lastLaunchCommand` 记录完整可复现启动命令行，proot 类失败可粘进 adb shell 逐项二分；
+- ⚠️ `TermuxBootstrapCatalog` 的官方 SHA256 需要**在宿主发布前重新锚定**：
+  占位哈希会被拒绝安装（fail-closed，防供应链投毒）。
+
 ## 8. 本地控制 API
 
 供 PC 端或外部编排器复用同一会话。**自研 RFC 6455 WebSocket**（零第三方依赖）：
@@ -172,9 +201,10 @@ runtime.container.diagnose()
 | 安全项 | 措施 |
 |---|---|
 | 网络边界 | 仅监听 `127.0.0.1` + **随机端口**；默认关闭 |
-| 鉴权 | 32 字节 SecureRandom 令牌；`?token=` 或 `Authorization: Bearer`；**定长 + 恒时比较** |
-| 命令安全 | 照走 `CommandPolicy`：BLOCKED 直接拒、CONFIRM 弹审批 —— **外部客户端不能绕过用户与审计** |
-| 帧安全 | 4MB 帧上限；分片续帧显式拒绝（不默默拼错） |
+| 鉴权 | 32 字节 SecureRandom 令牌；`?token=` 或 `Authorization: Bearer`；**定长 + 恒时比较**；令牌文件 0600，审计脱敏 |
+| 命令安全 | 照走 `CommandPolicy`：BLOCKED 直接拒、CONFIRM 弹审批 —— **外部客户端不能绕过用户与审计**；`session.write` 同样过 WriteGate（issue #9） |
+| 帧安全 | 4MB 帧上限；分片续帧完整组装（RFC 6455）；未掩码客户端帧 fail-close；64 位长度符号安全 |
+| 握手安全 | 握手阶段 10s 超时（slowloris 缓解）；协议自检器 `ControlApiSelfTest` 内置 |
 
 协议：请求 `{"id","method","params"}` → 响应 `{"id","ok","result"|"error"}`。
 方法：`server.info` / `session.list` / `session.open` / `session.exec` / `session.write` /

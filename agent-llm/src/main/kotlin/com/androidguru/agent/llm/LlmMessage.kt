@@ -47,11 +47,20 @@ data class ToolCall(
     val index: Int = -1,
 )
 
-/** Token 用量。 */
+/**
+ * Token 用量。
+ *
+ * [cachedTokens] 为 yl-ai AgentLoop 的对齐字段（I 组缺口）：OpenAI 兼容端点在
+ * `usage.prompt_tokens_details.cached_tokens` 上报命中上下文缓存的 prompt token
+ * 数，多轮 Agent 会话可据此统计缓存命中率、估算真实成本。null = 端点未上报
+ * （保持序列化/构造兼容：老调用点只传前三个参数不受影响）。
+ */
 data class Usage(
     val promptTokens: Long = 0,
     val completionTokens: Long = 0,
     val totalTokens: Long = 0,
+    /** 命中缓存的 prompt tokens（prompt_tokens_details.cached_tokens）；null = 未上报。 */
+    val cachedTokens: Long? = null,
 )
 
 /** 发给模型的工具定义。 */

@@ -18,6 +18,8 @@ import com.androidguru.agent.shell.session.CommandRunner
 import com.androidguru.agent.shell.session.SessionCheckpoint
 import com.androidguru.agent.shell.session.ShellSession
 import com.androidguru.agent.shell.session.ShellSessionManager
+import com.androidguru.agent.shell.termux.TermuxEnvironment
+import com.androidguru.agent.shell.termux.TermuxLauncher
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
@@ -67,6 +69,33 @@ class ShellRuntime(
     val controlServer: LocalControlServer,
 ) {
 
+    /**
+     * Termux 环境（惰性构建：宿主不用 Termux 时零开销）。
+     *
+     * 补齐 yl-ai 里程碑 2 能力（缺口分析 A 组）：bootstrap 安装（多镜像 + SHA256）、
+     * ZipEntry 内容判别符号链接、SYMLINKS.txt 恢复、apt 双源、引导脚本、完整性校验。
+     */
+    val termux: TermuxEnvironment by lazy {
+        TermuxEnvironment(baseDir = baseDir, downloader = downloader, audit = audit)
+    }
+
+    /**
+     * Termux 启动器（复用与容器相同的 PRoot 二件套解析约定：AGSH_PROOT /
+     * AGSH_PROOT_LOADER / AGSH_PROOT_LIB 环境变量；Android 宿主直接构造
+     * [ShellRuntime] 时可自行创建 [TermuxLauncher] 并用 createTermuxSession 的
+     * 通道注入方式接入）。
+     */
+    val termuxLauncher: TermuxLauncher by lazy {
+        TermuxLauncher(
+            environment = termux,
+            channelFactory = channelFactory,
+            audit = audit,
+            prootBinary = System.getenv("AGSH_PROOT")?.let(::File),
+            prootLoader = System.getenv("AGSH_PROOT_LOADER")?.let(::File),
+            libDir = System.getenv("AGSH_PROOT_LIB")?.let(::File),
+        )
+    }
+
     /** 每会话一个 [CommandRunner]（共享缓存，与控制 API 一致）。 */
     fun runnerOf(session: ShellSession): CommandRunner = CommandRunnerCache.runnerOf(session)
 
@@ -84,29 +113,78 @@ class ShellRuntime(
     /** 在 Alpine 容器里新建会话（未安装时返回 null 并推送错误横幅式消息由宿主处理）。 */
     fun createContainerSession(command: List<String> = listOf("/bin/sh")): ShellSession? {
         if (!container.isReady) return null
-        val session = ShellSession(
+        return openSession(
             id = java.util.UUID.randomUUID().toString().replace("-", "").take(8),
             title = "容器 · alpine",
-            environment = environment,
-            channelFactory = channelFactory,
-        )
-        return try {
-            val channel = proot.launch(
+            cwd = "/root",
+            replayBanner =
+                "[已进入容器] Alpine · rootfs=${container.rootfsDir.absolutePath}\r\n" +
+                    "提示：容器内文件系统独立；/root 已映射到宿主可写目录，互通。\r\n",
+            auditTag = "container.session",
+            auditDetail = "alpine cmd=${command.joinToString(" ")}",
+        ) {
+            proot.launch(
                 rootfs = container.rootfsDir,
                 command = command,
                 home = environment.home,
             )
+        }
+    }
+
+    /**
+     * 在 Termux 环境里新建会话（补齐 yl-ai 里程碑 2 的「Termux 执行链路」能力）。
+     *
+     * 未就绪（未安装 / PRoot 二件套缺失）时返回 null，宿主可用
+     * `termuxLauncher.prepare().reason` 向用户展示修复方向。
+     *
+     * @param command 环境内启动命令；空 = 官方 login（登录 shell + 引导脚本）
+     */
+    fun createTermuxSession(command: List<String> = emptyList()): ShellSession? {
+        val ready = termuxLauncher.prepare()
+        if (!ready.available) {
+            audit.recordSetting("termux.session_refused", ready.reason)
+            return null
+        }
+        return openSession(
+            id = java.util.UUID.randomUUID().toString().replace("-", "").take(8),
+            title = "Termux 环境",
+            cwd = termux.homeDir.absolutePath,
+            replayBanner =
+                "[已进入 Termux 环境] prefix=${termux.prefixDir.absolutePath}\r\n" +
+                    "提示：apt / bash 可用；路径与官方 Termux 一致（proot 自映射）。\r\n",
+            auditTag = "termux.session",
+            auditDetail = "cmd=${command.joinToString(" ")}",
+        ) {
+            termuxLauncher.launchLoginShell(command)
+        }
+    }
+
+    /** 会话打开的公共骨架：建会话 → 开通道 → cwd → 横幅 → 注册 → 审计；失败返回 null。 */
+    private fun openSession(
+        id: String,
+        title: String,
+        cwd: String,
+        replayBanner: String,
+        auditTag: String,
+        auditDetail: String,
+        open: () -> com.androidguru.agent.shell.process.ProcessChannel,
+    ): ShellSession? {
+        val session = ShellSession(
+            id = id,
+            title = title,
+            environment = environment,
+            channelFactory = channelFactory,
+        )
+        return try {
+            val channel = open()
             session.attachChannel(channel)
-            session.setCurrentDirectory("/root")
-            session.pushReplay(
-                "[已进入容器] Alpine · rootfs=${container.rootfsDir.absolutePath}\r\n" +
-                    "提示：容器内文件系统独立；/root 已映射到宿主可写目录，互通。\r\n",
-            )
+            session.setCurrentDirectory(cwd)
+            session.pushReplay(replayBanner)
             sessions.registerExternal(session)
-            audit.recordSetting("container.session", "alpine cmd=${command.joinToString(" ")}")
+            audit.recordSetting(auditTag, auditDetail)
             session
         } catch (t: Throwable) {
-            audit.recordSetting("container.session_failed", t.message ?: t.javaClass.simpleName)
+            audit.recordSetting("${auditTag}_failed", "${t.javaClass.simpleName}: ${t.message}")
             null
         }
     }
