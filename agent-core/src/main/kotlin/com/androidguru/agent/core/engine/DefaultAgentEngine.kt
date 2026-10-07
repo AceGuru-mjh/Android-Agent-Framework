@@ -159,7 +159,9 @@ class DefaultAgentEngine(
                 }
 
                 // ---- 有工具调用：执行并回填 ----
-                memory.appendAssistant(content = null, toolCalls = turn.toolCalls)
+                // 修复 issue #21 L-11：伴随工具调用的正文已 emit 给用户，也必须入记忆 ——
+                // 旧实现 content = null，下一轮上下文丢失该段（模型看起来"失忆"）
+                memory.appendAssistant(content = turn.text.ifBlank { null }, toolCalls = turn.toolCalls)
                 for (call in turn.toolCalls) {
                     if (aborted || !currentCoroutineContext().isActive) break
                     val result = executeOneCall(call)

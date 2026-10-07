@@ -4,6 +4,7 @@ import com.androidguru.agent.shell.ShellRuntime
 import com.androidguru.agent.shell.audit.AuditLog
 import com.androidguru.agent.shell.policy.ApprovalGate
 import com.androidguru.agent.shell.policy.CommandPolicy
+import com.androidguru.agent.shell.policy.WriteGate
 import com.androidguru.agent.shelltools.JsonArgs
 import com.androidguru.agent.tools.hook.HookDecision
 import com.androidguru.agent.tools.hook.HookEvent
@@ -17,8 +18,9 @@ import com.androidguru.agent.tools.hook.ToolHook
  * | 工具 | 策略来源 | BLOCKED | CONFIRM | SAFE |
  * |---|---|---|---|---|
  * | terminal_exec / container_exec / job_start | [CommandPolicy] 分级 | 直接拒 | 挂起等人 | 放行 |
- * | fs_write | 恒 CONFIRM（带内容摘要） | — | 挂起等人 | 放行 |
- * | file_delete | 恒 CONFIRM（可回收） | — | 挂起等人 | 放行 |
+ * | terminal_write | [WriteGate] 行级扫描（修复 issue #9） | 直接拒 | 引导改用 terminal_exec | 放行 |
+ * | fs_write | 恒 CONFIRM（带内容摘要，记忆键 = 完整路径） | — | 挂起等人 | 放行 |
+ * | file_delete | 恒 CONFIRM（可回收，记忆键 = 完整路径） | — | 挂起等人 | 放行 |
  * | 其余 | 不介入 | — | — | 放行 |
  *
  * **拒绝回灌**：DENY 不是异常，而是 [HookDecision.Block]，其 reason 作为工具结果
@@ -65,6 +67,8 @@ class ShellApprovalHook(
                         },
                         level = CommandPolicy.Level.CONFIRM,
                         canRollback = false,
+                        // 修复 issue #17：记忆键用完整路径，避免「本次都允许」退化为文件名
+                        memoryKey = "fs_write:${java.io.File(path).absolutePath}",
                     ),
                 )
                 return verdictToDecision("fs_write", path, verdict)
@@ -82,9 +86,24 @@ class ShellApprovalHook(
                         level = CommandPolicy.Level.CONFIRM,
                         canRollback = true,
                         rollbackHint = "删除后可从 trash 目录找回",
+                        // 修复 issue #17：记忆键用完整路径
+                        memoryKey = "file_delete:${java.io.File(path).absolutePath}",
                     ),
                 )
                 return verdictToDecision("file_delete", path, verdict)
+            }
+
+            // 修复 issue #9：terminal_write 旧实现完全绕过策略/审批/审计，
+            // 被拒命令可以换通道执行。现在行级扫描：BLOCKED 拦截、
+            // 命令形态的 CONFIRM 引导走 terminal_exec，纯交互应答保持畅通
+            "terminal_write" -> {
+                val input = JsonArgs.parse(event.arguments).str("input") ?: return HookDecision.Proceed
+                val result = WriteGate.gate(input, AuditLog.Source.AI, runtime.policy, runtime.audit)
+                return if (result.allowed) {
+                    HookDecision.Proceed
+                } else {
+                    HookDecision.Block(result.reason!!)
+                }
             }
 
             else -> return HookDecision.Proceed

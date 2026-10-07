@@ -25,9 +25,12 @@ object AnsiStripper {
                     if (i >= n) break
                     when (input[i]) {
                         '[' -> {
-                            // CSI：ESC [ + 0x20..0x3F 参数字节 + 终止字节
+                            // CSI：ESC [ + 0x20..0x3F 参数字节 + 终止字节（0x40..0x7E）
+                            // 修复 issue #21 L-1：参数字节范围应为 ' '..'?'（0x20..0x3F），
+                            // 旧实现包含 '@'（0x40）—— 终止字节为 '@'（如 ICH `ESC[5@`）时
+                            // 会被当参数吞掉再多吞一个正文字符
                             i++
-                            while (i < n && input[i] in ' '..'@') i++
+                            while (i < n && input[i] in ' '..'?') i++
                             if (i < n) i++
                         }
                         ']' -> {

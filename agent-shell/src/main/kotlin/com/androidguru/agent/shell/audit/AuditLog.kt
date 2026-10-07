@@ -170,19 +170,31 @@ class FileAuditLog(private val dir: File) : AuditLog {
         if (limit <= 0) return emptyList()
         val files = dir.listFiles { f -> f.name.startsWith("audit-") && f.name.endsWith(".jsonl") }
             ?.sortedByDescending { it.name } ?: return emptyList()
+        // 修复 issue #13：旧实现从文件头顺序读、凑满 limit 即 break ——
+        // 取到的是「最新一天里最老的事件」，当日事件超过 limit 时最新命令永远查不到。
+        // 现在用有界环形缓冲保留每个文件的**最后** limit 条合格事件，再跨文件归并
         val events = mutableListOf<AuditLog.Event>()
+        val candidates = ArrayDeque<AuditLog.Event>()
         for (file in files) {
             if (events.size >= limit) break
+            candidates.clear()
             runCatching {
                 file.useLines { lines ->
                     for (line in lines) {
-                        if (events.size >= limit) break
                         runCatching { json.decodeFromString<AuditLog.Event>(line) }
                             .getOrNull()
                             ?.takeIf { (type == null || it.type == type) && it.seq !in excludeSeqs }
-                            ?.let(events::add)
+                            ?.let {
+                                candidates.addLast(it)
+                                if (candidates.size > limit) candidates.removeFirst()
+                            }
                     }
                 }
+            }
+            // 该文件最新的在后面（文件按时间追加），倒序并入归并集
+            for (e in candidates.asReversed()) {
+                events.add(e)
+                if (events.size >= limit) break
             }
         }
         return events.sortedByDescending { it.seq }

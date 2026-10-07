@@ -75,7 +75,9 @@ class McpClient(
             if (cursor != null) put("cursor", cursor)
         }
         val response = sendRequest(McpProtocol.Methods.TOOLS_LIST, params)
-        val result = response["result"] as? JsonObject ?: JsonObject(emptyMap())
+        // 修复 issue #21 L-5：走 resultOf 解包 —— 旧实现直接读 ["result"]，
+        // 服务端返回 JSON-RPC error 时被吞成「0 个工具」而不报错
+        val result = JsonRpc.resultOf(response) as? JsonObject ?: JsonObject(emptyMap())
         val tools = (result["tools"] as? JsonArray ?: JsonArray(emptyList()))
             .mapNotNull { el -> (el as? JsonObject)?.let(McpToolDescriptor::fromJson) }
         val next = (result["nextCursor"] as? JsonPrimitive)?.content

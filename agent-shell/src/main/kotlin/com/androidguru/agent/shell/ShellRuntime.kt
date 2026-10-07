@@ -22,6 +22,20 @@ import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
 /**
+ * 每会话一个 [CommandRunner] 的共享缓存（修复 issue #18）。
+ *
+ * ShellRuntime 与 LocalControlServer 必须共用同一份缓存 —— 若各自建缓存，
+ * 同一会话会有两个 runner、两把互不相干的 Mutex，agent 工具与控制 API
+ * 并发 exec 时哨兵输出互相污染。
+ */
+internal object CommandRunnerCache {
+    private val runners = ConcurrentHashMap<String, CommandRunner>()
+
+    fun runnerOf(session: ShellSession): CommandRunner =
+        runners.computeIfAbsent(session.id) { CommandRunner(session) }
+}
+
+/**
  * Shell 运行时 —— 终端能力的组装根。
  *
  * 一个 [ShellRuntime] 聚合全部终端子系统，[agent-shell-tools 的 ShellToolSet]
@@ -53,11 +67,8 @@ class ShellRuntime(
     val controlServer: LocalControlServer,
 ) {
 
-    /** 每会话一个 [CommandRunner]（缓存）。 */
-    private val runners = ConcurrentHashMap<String, CommandRunner>()
-
-    fun runnerOf(session: ShellSession): CommandRunner =
-        runners.computeIfAbsent(session.id) { CommandRunner(session) }
+    /** 每会话一个 [CommandRunner]（共享缓存，与控制 API 一致）。 */
+    fun runnerOf(session: ShellSession): CommandRunner = CommandRunnerCache.runnerOf(session)
 
     /** 后台作业工厂。 */
     fun startJob(command: String, workdir: String? = null): ShellJob =
@@ -167,6 +178,9 @@ class ShellRuntime(
                     audit = audit,
                     environment = environment,
                     tokenStore = tokenStore,
+                    // 修复 issue #18：与运行时共享同一份 CommandRunner 缓存，
+                    // 避免同一会话两个 runner 并发执行破坏哨兵串行互斥
+                    runnerProvider = CommandRunnerCache::runnerOf,
                 ),
             )
         }

@@ -85,6 +85,20 @@ class ToolCircuitBreaker(
         return opened
     }
 
+    /**
+     * 归还探测槽（中性结果，不计成败）。
+     *
+     * 修复 issue #10：工具调用的早退路径（钩子阻断 / schema 校验失败 / 限流 /
+     * 协程取消）既不算成功也不算失败，但必须释放 HALF_OPEN 探测槽，
+     * 否则该工具会永久停留在「探测中」—— 之后所有调用都被误判为熔断。
+     */
+    fun recordNeutral(toolId: String) {
+        val entry = entry(toolId)
+        synchronized(entry) {
+            if (entry.state == State.HALF_OPEN) entry.probing = false
+        }
+    }
+
     fun stateOf(toolId: String): State = synchronized(entry(toolId)) { entry(toolId).state }
 
     fun reset() = entries.clear()

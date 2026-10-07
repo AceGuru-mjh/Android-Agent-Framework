@@ -385,7 +385,9 @@ class OpenAiCompatibleClient(private val config: LlmConfig) : LlmClient {
                 }
 
                 override fun onResponse(call: Call, response: Response) {
-                    if (cont.isActive) cont.resume(response)
+                    // 修复 issue #21 L-9：取消恰好发生在恢复前时关闭 Response，
+                    // 避免连接泄漏
+                    if (cont.isActive) cont.resume(response) else response.close()
                 }
             })
         }

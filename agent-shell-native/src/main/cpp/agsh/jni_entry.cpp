@@ -109,6 +109,12 @@ Java_com_androidguru_agent_shell_nativeruntime_NativeBridge_nativeWrite(
         env->ThrowNew(env->FindClass("java/lang/IllegalArgumentException"), "bad write args");
         return -1;
     }
+    // 修复 issue #21 L-13：校验 offset+length 不超出数组长度，堵住 JNI 越界读缺口
+    const jsize cap = env->GetArrayLength(buffer);
+    if (static_cast<jlong>(offset) + static_cast<jlong>(length) > static_cast<jlong>(cap)) {
+        env->ThrowNew(env->FindClass("java/lang/IllegalArgumentException"), "write range out of bounds");
+        return -1;
+    }
     jbyte* p = env->GetByteArrayElements(buffer, nullptr);
     if (p == nullptr) return -1;
     const ssize_t n = agsh::pty_write(fd, p + offset, static_cast<size_t>(length));

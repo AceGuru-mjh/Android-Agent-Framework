@@ -93,10 +93,46 @@ class DefaultToolExecutor(
             )
         }
 
+        // 修复 issue #10：HALF_OPEN 探测槽必须被归还 ——
+        // 旧实现里钩子阻断 / schema 校验失败 / 限流 / 协程取消这些早退路径
+        // 都不会调 recordSuccess/recordFailure，探测槽永久占用后
+        // 工具会一直报「熔断中」直到 reset。settled=true 表示熔断器已记过账
+        var breakerSettled = false
+        try {
+            val result = executeGuarded(tool, toolId, arguments, callId, startedAt, onEarlyReturn = {
+                // 早退路径（Block/校验失败/限流）：探测不计成败，归还探测槽
+                breakerSettled = true
+                breaker.recordNeutral(toolId)
+            })
+            // 6. 熔断记账（业务失败也计入熔断）
+            if (result.ok) breaker.recordSuccess(toolId) else breaker.recordFailure(toolId)
+            breakerSettled = true
+
+            // 7. PostToolUse 钩子（通知性质）
+            hooks.dispatch(HookEvent.PostToolUse(toolId, result))
+            return record(toolId, startedAt, result)
+        } catch (ce: CancellationException) {
+            if (!breakerSettled) breaker.recordNeutral(toolId)
+            throw ce
+        } finally {
+            if (!breakerSettled) breaker.recordNeutral(toolId)
+        }
+    }
+
+    /** 熔断后的守卫段：钩子 → Schema 校验 → 限流 → 执行。 */
+    private suspend fun executeGuarded(
+        tool: AgentTool,
+        toolId: String,
+        arguments: String,
+        callId: String,
+        startedAt: Long,
+        onEarlyReturn: () -> Unit,
+    ): ToolResult {
         // 3. PreToolUse 钩子（可阻断 / 改参）
         var effectiveArgs = arguments
         when (val decision = hooks.dispatch(HookEvent.PreToolUse(toolId, effectiveArgs))) {
             is HookDecision.Block -> {
+                onEarlyReturn()
                 return record(
                     toolId, startedAt,
                     ToolResult.failure("工具调用被钩子阻断: ${decision.reason}", ToolErrorCode.PERMISSION),
@@ -110,6 +146,7 @@ class DefaultToolExecutor(
         // 4. Schema 校验（声明过才校验；无 schema 的工具直通）
         val schemaErrors = tool.parameters.validate(effectiveArgs)
         if (schemaErrors.isNotEmpty()) {
+            onEarlyReturn()
             return record(
                 toolId, startedAt,
                 ToolResult.failure(
@@ -124,6 +161,7 @@ class DefaultToolExecutor(
         val policy = policies[toolId] ?: defaultPolicy
         val rateLimited = rateLimiter.tryAcquire(toolId, policy.rateLimitPerMinute)
         if (!rateLimited) {
+            onEarlyReturn()
             return record(
                 toolId, startedAt,
                 ToolResult.failure(
@@ -133,15 +171,7 @@ class DefaultToolExecutor(
             )
         }
 
-        val result = executeWithPolicy(tool, effectiveArgs, callId, policy)
-
-        // 6. 熔断记账（业务失败也计入熔断）
-        if (result.ok) breaker.recordSuccess(toolId) else breaker.recordFailure(toolId)
-
-        // 7. PostToolUse 钩子（通知性质）
-        hooks.dispatch(HookEvent.PostToolUse(toolId, result))
-
-        return record(toolId, startedAt, result)
+        return executeWithPolicy(tool, effectiveArgs, callId, policy)
     }
 
     private suspend fun executeWithPolicy(

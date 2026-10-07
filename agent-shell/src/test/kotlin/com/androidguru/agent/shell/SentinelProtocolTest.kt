@@ -94,6 +94,41 @@ class SentinelProtocolTest {
     }
 
     @Test
+    fun `提取_PTY回显开启时锚定到真实标记`() {
+        // 修复 issue #8：真 PTY（回显开启）会把 payload 原样回显 ——
+        // 回显行里标记前面是引号（非行首），真实输出里标记必然行首。
+        // 旧实现取第一个匹配 → 锚定到回显上 → `:%s` 退出码永不匹配 → 全部超时
+        val id = "abc123def456"
+        val begin = SentinelProtocol.beginMarker(id)
+        val end = SentinelProtocol.endMarker(id)
+        val echoed =
+            "printf '\\n$begin\\n'\r\n" +           // 回显行 1（含 BEGIN 字面量，前面是 ' 字符）
+                "ls -la\r\n" +                      // 回显行 2（命令）
+                "__agsh_rc=\$?\r\n" +               // 回显行 3
+                "printf '$end:%s\\n' \"\$__agsh_rc\"\r\n" // 回显行 4（含 END 字面量 + :%s）
+        val realOutput = "\n$begin\n" + "file-a\nfile-b\n" + "$end:0\r\n"
+        val cumulative = echoed + realOutput
+
+        val ex = SentinelProtocol.extract(cumulative, id)
+        assertNotNull("PTY 回显开启时必须仍能解析（issue #8）", ex)
+        assertEquals(0, ex!!.exitCode)
+        assertTrue(ex.rawBody.contains("file-a"))
+        assertTrue(ex.rawBody.contains("file-b"))
+    }
+
+    @Test
+    fun `提取_输出含printf字样不误杀`() {
+        // 修复 issue #21 L-2：旧实现的 `printf '` 宽过滤会丢弃 grep 结果
+        val id = "abc123"
+        val raw = "\n${SentinelProtocol.beginMarker(id)}\n" +
+            "grep \"printf '\" found at line 3\n" +
+            "${SentinelProtocol.endMarker(id)}:0\n"
+        val ex = SentinelProtocol.extract(raw, id)
+        assertNotNull(ex)
+        assertTrue(ex!!.rawBody.contains("grep"))
+    }
+
+    @Test
     fun `stripEchoedCommand 去掉回显首行`() {
         val body = "ls -la\ntotal 0\ndrwxr-xr-x .\n"
         val cleaned = SentinelProtocol.stripEchoedCommand(body, "ls -la")

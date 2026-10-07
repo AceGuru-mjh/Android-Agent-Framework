@@ -45,6 +45,8 @@ class ShellJob(
     @Serializable
     enum class State { RUNNING, STOPPING, STOPPED, EXITED, INTERRUPTED }
 
+    // 修复 issue #20：state 跨线程读写（watch 协程 / stop / JobTools 轮询）需保证可见性
+    @Volatile
     var state: State = State.RUNNING
         private set
 
@@ -114,9 +116,15 @@ class ShellJob(
 
     private fun finish() {
         val code = runCatching { channel.waitFor(1000) }.getOrDefault(-1)
-        exitCode = code
-        finishedAt = System.currentTimeMillis()
-        state = if (state == State.STOPPING) State.STOPPED else State.EXITED
+        // 修复 issue #20：stop() 已判停（STOPPING/STOPPED）时不得改判 ——
+        // 旧实现里 stop() 置 STOPPED 后 watch 循环的 finish() 会把
+        // 用户主动停止的作业改写成 EXITED，退出码也被 waitFor 的 137 覆盖
+        synchronized(this) {
+            if (state == State.STOPPING || state == State.STOPPED) return
+            exitCode = code
+            finishedAt = System.currentTimeMillis()
+            state = State.EXITED
+        }
         store?.save(this)
     }
 
@@ -269,7 +277,8 @@ class ShellJob(
             }
             runCatching {
                 jobsDir.mkdirs()
-                val tmp = File(jobsDir, "$INDEX_FILE.tmp")
+                // 修复 issue #21 L-4：tmp 名加唯一后缀，避免并发 persist 互相截断
+                val tmp = File(jobsDir, "$INDEX_FILE.tmp-${System.nanoTime()}")
                 tmp.writeText(json.encodeToString(snapshot))
                 val index = File(jobsDir, INDEX_FILE)
                 if (index.exists()) index.delete()

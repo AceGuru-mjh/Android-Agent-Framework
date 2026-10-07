@@ -127,14 +127,15 @@ class Downloader(
             val stream = conn.inputStream
             val buf = ByteArray(8192)
             var received = 0
-            val out = StringBuilder()
+            val bytes = java.io.ByteArrayOutputStream()
             while (received < limitBytes) {
                 val n = stream.read(buf, 0, minOf(buf.size, limitBytes - received))
                 if (n < 0) break
-                out.append(String(buf, 0, n, Charsets.UTF_8))
+                bytes.write(buf, 0, n)
                 received += n
             }
-            out.toString()
+            // 修复 issue #12：整体解码而非逐 chunk 解码，避免多字节字符跨 chunk 损坏
+            String(bytes.toByteArray(), Charsets.UTF_8)
         } finally {
             conn.disconnect()
         }
