@@ -13,7 +13,7 @@
 - **基础能力完善**：聚焦框架级底座 —— Agent 引擎、工具系统、LLM 适配、MCP 协议、插件 SDK。
 - **终端执行能力**（PR #4，自 [yl-ai](https://github.com/iill392/yl-ai) 移植重写）：共享终端会话、哨兵执行、风险分级与审批闸门、后台作业、Alpine 容器（PRoot）、本地控制 API、审计。
 - **C++17 原生增强层**（PR #5）：forkpty 真 PTY 通道、ANSI 批量清洗、ELF64 补丁 —— 不可用时优雅回退纯 JVM，框架主体仍零平台依赖。
-- **长程任务能力**（PR #8）：任务计划（todo 状态机 + 每轮注入）、迭代预算续跑、相同调用循环护栏、崩溃恢复（计划与会话双持久化）。
+- **长程任务能力**（PR #22）：任务计划（todo 状态机 + 每轮注入）、迭代预算续跑、相同调用循环护栏、崩溃恢复（计划与会话双持久化）。
 - **克制**：不含原项目中的设备工具集、认知记忆等业务高级功能；连接器体系不复用，插件与 MCP 全新重做。
 
 ## 模块总览
@@ -28,7 +28,7 @@
 | `agent-shell` | **全新移植**的终端引擎：共享终端会话、哨兵式命令执行、命令风险分级、挂起式审批闸门、后台作业、Alpine 容器（PRoot）、本地控制 API、审计与崩溃恢复 | [SHELL_GUIDE.md](docs/SHELL_GUIDE.md) |
 | `agent-shell-tools` | **全新移植**的终端工具集：19 个正交 AgentTool、审批/审计钩子、系统提示词构建器、平台能力 SPI | [SHELL_GUIDE.md](docs/SHELL_GUIDE.md) |
 | `agent-shell-native` | **C++17 原生增强层**（PR #5）：forkpty 真 PTY 通道（NativeProcessChannelFactory）、ANSI 批量清洗、ELF64 补丁（RUNPATH/SONAME），不可用时优雅回退纯 JVM | [NATIVE_GUIDE.md](docs/NATIVE_GUIDE.md) |
-| `agent-tasks` | **长程任务系统**（PR #8）：TaskPlan 计划状态机（rewrite/patch 双模式）、每轮计划状态注入、进度观察、文件持久化 + `LongTaskAgent` 装配门面 | [LONG_TASK_GUIDE.md](docs/LONG_TASK_GUIDE.md) |
+| `agent-tasks` | **长程任务系统**（PR #22）：TaskPlan 计划状态机（rewrite/patch 双模式）、每轮计划状态注入、进度观察、文件持久化 + `LongTaskAgent` 装配门面 | [LONG_TASK_GUIDE.md](docs/LONG_TASK_GUIDE.md) |
 | `examples/simple-agent` | 最小可运行示例：控制台对话 Agent（含插件演示） | [GETTING_STARTED.md](docs/GETTING_STARTED.md) |
 | `examples/terminal-agent` | 终端 Agent 示例：ShellToolSet 全套接入 + 原生 PTY 自动探测 + 控制台审批 | [SHELL_GUIDE.md](docs/SHELL_GUIDE.md) |
 | `examples/long-task-agent` | 长程任务示例：计划进度条 + 预算续跑确认 + `--resume` 崩溃恢复 | [LONG_TASK_GUIDE.md](docs/LONG_TASK_GUIDE.md) |
