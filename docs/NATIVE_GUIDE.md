@@ -75,7 +75,7 @@ ctest --test-dir build-native --output-on-failure        # C++ 单元测试（17
 ```bash
 cmake -S agent-shell-native/src/main/cpp -B build-android \
   -DCMAKE_TOOLCHAIN_FILE=$NDK/build/cmake/android.toolchain.cmake \
-  -DANDROID_ABI=arm64-v8a -DANDROID_STL=none -DCMAKE_BUILD_TYPE=Release
+  -DANDROID_ABI=arm64-v8a -DANDROID_STL=c++_static -DCMAKE_BUILD_TYPE=Release
 cmake --build build-android --parallel
 ```
 
