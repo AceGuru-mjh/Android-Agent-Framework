@@ -24,18 +24,6 @@ namespace {
 using agsh::SpawnError;
 using agsh::SpawnRequest;
 
-// 错误码 → 可读消息（对齐 yl-ai PtyErrors 的约定）。
-const char* spawn_error_text(SpawnError e) {
-    switch (e) {
-        case SpawnError::kOpenPty: return "openpty/grantpt/unlockpt failed";
-        case SpawnError::kFork: return "fork failed";
-        case SpawnError::kNoMemory: return "out of memory";
-        case SpawnError::kBadArgs: return "bad arguments";
-        case SpawnError::kNone: break;
-    }
-    return "unknown";
-}
-
 inline std::string to_std_string(JNIEnv* env, jstring s) {
     if (s == nullptr) return {};
     const char* p = env->GetStringUTFChars(s, nullptr);

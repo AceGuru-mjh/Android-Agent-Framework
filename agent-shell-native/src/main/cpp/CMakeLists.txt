@@ -3,7 +3,10 @@
 # 两种构建形态：
 #   1) Android 交叉编译（NDK 工具链，CI native-android job）：
 #      cmake -DCMAKE_TOOLCHAIN_FILE=$NDK/build/cmake/android.toolchain.cmake \
-#            -DANDROID_ABI=arm64-v8a -DANDROID_STL=none ..
+#            -DANDROID_ABI=arm64-v8a -DANDROID_STL=c++_static \
+#            -DANDROID_PLATFORM=android-29 ..
+#      注意：Bionic 的 forkpty 为 API 23+，且 minSdk=29（Android 10）与
+#      yl-ai 一致 —— W^X 执行策略的分界线，必须显式指定 ANDROID_PLATFORM。
 #   2) Host 构建（CI native-host job + 开发机）：
 #      cmake .. && cmake --build . && ctest
 #      产出 libagsh_native.so，供 JVM 测试通过 -Dagsh.native.lib=<绝对路径> 加载。
