@@ -118,7 +118,7 @@ CI 产出的成品库在 Actions → Artifacts 下载。
 - [x] **PR #3** — 插件系统重做 + 示例 + 发布工作流（agent-plugin / examples / release）
 - [x] **PR #4** — 终端能力整体移植：agent-shell / agent-shell-tools（自 yl-ai 移植重写，修复哨兵协议缺陷）
 - [x] **PR #5** — C++17 原生增强层（agent-shell-native）+ PRoot RUNPATH 自动清空 + CI 全面编译验证（JVM 矩阵 / C++ host / NDK 交叉编译）+ PR 门禁（pr-check.yml）
-- [ ] **PR #8** — yl-ai 全量融合收尾 + 全线加固：Termux 环境（agent-shell/termux + termux_exec 工具）、聊天层（agent-chat）、控制 API 自检器、设置存储（SecretVault 首个消费者）、LLM 细节（cachedTokens / normalizeEndpoint / 8 家预设 / 自带工具注入）；**23 项 bug 修复**（issues #8–#21：PTY 回显哨兵锚定、写入通道门控、熔断探测槽泄漏、UTF-8 跨 chunk、审计取旧、策略绕过、RFC 6455 合规等）
+- [ ] **PR #23** — yl-ai 全量融合收尾 + 全线加固：Termux 环境（agent-shell/termux + termux_exec 工具）、聊天层（agent-chat）、控制 API 自检器、设置存储（SecretVault 首个消费者）、LLM 细节（cachedTokens / normalizeEndpoint / 8 家预设 / 自带工具注入）；**23 项 bug 修复**（issues #8–#21：PTY 回显哨兵锚定、写入通道门控、熔断探测槽泄漏、UTF-8 跨 chunk、审计取旧、策略绕过、RFC 6455 合规等）
 
 ## License
 
