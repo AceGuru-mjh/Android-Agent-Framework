@@ -109,6 +109,18 @@ class DefaultAgentEngine(
     @Volatile
     private var loopDetector: ToolCallLoopDetector? = null
 
+    /** 反思引擎（失败驱动纠错；任务开始时按配置重建）。 */
+    @Volatile
+    private var reflectionEngine: ReflectionEngine? = null
+
+    /** 跑偏检测器（停滞 + 目标对齐；任务开始时按配置重建）。 */
+    @Volatile
+    private var driftDetector: TaskDriftDetector? = null
+
+    /** 最近一次上报的交替循环指纹（去重：同指纹不重复上报）。 */
+    @Volatile
+    private var lastReportedCycleKey: String? = null
+
     override val isRunning: Boolean get() = running.get()
 
     // ------------------------------------------------------------------
@@ -219,6 +231,17 @@ class DefaultAgentEngine(
         } else {
             null
         }
+        reflectionEngine = if (cfg.reflectionEnabled) {
+            ReflectionEngine(llmClient, cfg)
+        } else {
+            null
+        }
+        driftDetector = if (cfg.driftDetectionEnabled) {
+            TaskDriftDetector(llmClient, cfg)
+        } else {
+            null
+        }
+        lastReportedCycleKey = null
     }
 
     /** 运行收尾：释放闸门 + 记录尾状态供续跑。 */
@@ -243,6 +266,7 @@ class DefaultAgentEngine(
             iteration++
             stats.iterations = iteration
             emit(AgentEvent.IterationStart(iteration))
+            driftDetector?.onIterationStart(iteration)
 
             maybeCompressContext()
 
@@ -285,7 +309,15 @@ class DefaultAgentEngine(
                 if (aborted || !currentCoroutineContext().isActive) break
                 val result = executeOneCall(call)
                 stats.totalToolCalls++
+                // 反思/跑偏信号接入（记录在任何护栏注入之前，基于原始结果判定）
+                reflectionEngine?.recordResult(call.name, call.arguments, result)
+                driftDetector?.onToolCall(call.name, call.arguments, progressed = result.ok)
                 memory.appendToolResult(call.id, renderForModel(guardLoop(call, result)))
+            }
+
+            // ---- 迭代收尾护栏：反思纠错 / 交替循环 / 跑偏检测 ----
+            if (!aborted && currentCoroutineContext().isActive) {
+                postIterationGuardrails()
             }
         }
     }
@@ -316,7 +348,84 @@ class DefaultAgentEngine(
     }
 
     /**
-     * 循环护栏：同一工具 + 完全相同参数在窗口内重复达到阈值时，
+     * 迭代收尾护栏：反思纠错（连续失败）→ 交替循环检测（A→B→A→B）→ 跑偏检测
+     * （进展停滞 + 周期性目标对齐抽查）。
+     *
+     * 所有注入均为**建议性**系统消息，不阻断主循环 —— 与循环护栏同一纪律；
+     * 反思/抽查自身的 LLM 调用失败全部被内部吸收（启发式回退 / 静默跳过）。
+     */
+    private suspend fun FlowCollector<AgentEvent>.postIterationGuardrails() {
+        val goal = currentGoal()
+        val reflection = reflectionEngine
+
+        // ---- 反思纠错：连续失败达阈值 ----
+        if (reflection != null && reflection.shouldReflect()) {
+            val outcome = reflection.reflect(goal, loopSignal = null)
+            memory.appendSystem("[reflection] ${outcome.lesson}")
+            emit(AgentEvent.ReflectionTriggered(outcome.triggerReason, outcome.lesson, outcome.byLlm))
+        }
+
+        // ---- 交替循环护栏：签名序列周期检测（原实现漏检形态） ----
+        val detector = loopDetector
+        if (detector != null) {
+            val cycle = detector.detectCycle()
+            if (cycle != null) {
+                val key = "${cycle.description}@${cycle.repetitions}"
+                if (key != lastReportedCycleKey) {
+                    lastReportedCycleKey = key
+                    emit(
+                        AgentEvent.LoopDetected(
+                            toolName = "cycle",
+                            repeatedCount = cycle.repetitions,
+                            arguments = cycle.description,
+                        ),
+                    )
+                    memory.appendSystem(detector.cycleAdvisoryText(cycle))
+                    if (reflection != null && reflection.canReflectNow()) {
+                        val outcome = reflection.reflect(goal, loopSignal = cycle)
+                        memory.appendSystem("[reflection] ${outcome.lesson}")
+                        emit(
+                            AgentEvent.ReflectionTriggered(outcome.triggerReason, outcome.lesson, outcome.byLlm),
+                        )
+                    }
+                }
+            }
+        }
+
+        // ---- 跑偏检测 ----
+        val drift = driftDetector
+        if (drift != null) {
+            val stagnationAdvisory = drift.onIterationEnd()
+            if (stagnationAdvisory != null) {
+                memory.appendSystem("[drift-guard] $stagnationAdvisory")
+                emit(
+                    AgentEvent.DriftSuspected(
+                        stagnationIterations = configSnapshot.driftStagnationIterations,
+                        reason = "进展停滞：连续多轮无成功进展",
+                        advisory = stagnationAdvisory,
+                    ),
+                )
+            }
+            if (drift.shouldCheckAlignment()) {
+                val verdict = drift.checkAlignment(goal ?: "（未知）")
+                if (verdict != null && !verdict.aligned) {
+                    val advisory = "目标对齐抽查未通过：${verdict.reason}。请对照原始目标重新聚焦：$goal"
+                    memory.appendSystem("[drift-guard] $advisory")
+                    emit(AgentEvent.DriftSuspected(0, verdict.reason, advisory))
+                }
+            }
+        }
+
+        reflection?.onIterationEnd()
+    }
+
+    /** 当前任务目标：首条用户消息（截断），供反思/对齐检查引用。 */
+    private fun currentGoal(): String? =
+        memory.snapshot().firstOrNull { it is LlmMessage.User }
+            ?.let { (it as LlmMessage.User).content.take(200) }
+
+    /**
+     * 循环护栏：同一工具 + 语义等价参数在窗口内重复达到阈值时，
      * 发出 [AgentEvent.LoopDetected] 并把建议文本附加到回填给模型的结果上。
      */
     private suspend fun FlowCollector<AgentEvent>.guardLoop(call: ToolCall, result: ToolResult): ToolResult {
@@ -618,10 +727,24 @@ class DefaultAgentEngine(
         val ASK_USER_TOOL_DESCRIPTION = "当缺少必要信息、需要用户确认或选择时调用。" +
             "参数: {\"prompt\": \"要问用户的问题\"}。引擎会挂起等待用户回答。"
 
+        /**
+         * 默认系统提示（PR #26 结构化升级）：
+         * 工作纪律 / 错误处理 / 多步任务 / 循环防护 —— 从 5 行硬编码提示升级为
+         * 分节结构（保持首句不变，兼容既有测试与宿主断言）。
+         */
         const val DEFAULT_SYSTEM_PROMPT =
             "You are a capable agent running on Android Agent Framework. " +
                 "Work step by step. Use the available tools when they help complete the task. " +
                 "If required information is missing, use the ask_user tool. " +
-                "Always respond in the user's language."
+                "Always respond in the user's language.\n\n" +
+                "# 工作纪律\n" +
+                "- 先想清楚再动手：多步骤任务先拆解步骤，逐项推进，不要跳步或并行堆砌操作；\n" +
+                "- 每个动作之后依据观察到的结果决定下一步，不要在未验证前假设成功。\n\n" +
+                "# 错误处理\n" +
+                "- 工具失败时，先读错误信息与建议，分析原因后换方法，不要原样重试；\n" +
+                "- 连续失败两次仍无进展：停下来重新审视整体思路，或用 ask_user 求助。\n\n" +
+                "# 多步骤任务\n" +
+                "- 有 task_plan 工具时：先建计划再执行，完成一项标记一项；\n" +
+                "- 中途发现偏差：说明原因并修正计划，不要将错就错。"
     }
 }

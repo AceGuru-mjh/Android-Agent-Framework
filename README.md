@@ -15,6 +15,7 @@
 - **C++17 原生增强层**（PR #5）：forkpty 真 PTY 通道、ANSI 批量清洗、ELF64 补丁 —— 不可用时优雅回退纯 JVM，框架主体仍零平台依赖。
 - **长程任务能力**（PR #22）：任务计划（todo 状态机 + 每轮注入）、迭代预算续跑、相同调用循环护栏、崩溃恢复（计划与会话双持久化）。
 - **长期记忆能力**（PR #24）：跨会话三层记忆（工作/情景/语义）—— 每轮相关性召回注入、记忆三件套工具、会话结束抽取（LLM + 启发式回退）、压缩时捕获被裁对话、审批授权跨会话存续（opt-in + TTL）。
+- **Agent 智能深化**（PR #26）：反思纠错（失败驱动的 LLM 根因分析 + 启发式回退）、语义循环检测（JSON 键序等价签名 + A→B→A→B 交替周期）、跑偏检测（进展停滞 + 周期性目标对齐抽查）、框架主动的子目标拆解（阶段→步骤+验收标准，父任务状态自动收拢）、**移动端任务评估**（agent-eval：轨迹校验 + 18 任务标准套件 + 调优报告）、**本地模型深度适配**（文本协议工具调用模拟 + 档位库）。
 - **克制**：不含原项目中的设备工具集等业务高级功能；连接器体系不复用，插件与 MCP 全新重做。
 
 ## 模块总览
@@ -32,6 +33,7 @@
 | `agent-shell-native` | **C++17 原生增强层**（PR #5）：forkpty 真 PTY 通道（NativeProcessChannelFactory）、ANSI 批量清洗、ELF64 补丁（RUNPATH/SONAME），不可用时优雅回退纯 JVM | [NATIVE_GUIDE.md](docs/NATIVE_GUIDE.md) |
 | `agent-tasks` | **长程任务系统**（PR #22）：TaskPlan 计划状态机（rewrite/patch 双模式）、每轮计划状态注入、进度观察、文件持久化 + `LongTaskAgent` 装配门面 | [LONG_TASK_GUIDE.md](docs/LONG_TASK_GUIDE.md) |
 | `agent-memory` | **长期记忆系统**（PR #24）：三层记忆架构（工作/情景/语义）、四因子相关性召回每轮注入、memory_save/search/forget 三件套工具、会话结束抽取（LLM + 启发式回退 + 去重）、压缩时捕获被裁对话、`MemorySystem` 装配门面 | [MEMORY_GUIDE.md](docs/MEMORY_GUIDE.md) |
+| `agent-eval` | **任务评估系统**（PR #26）：轨迹校验器（必做/禁止调用 + 参数级匹配 + 循环/轮数/收尾文本判据）、移动端任务套件（8 类 18 任务标准集）、评估 harness（失败隔离 + 逐任务报告）、调优报告（成功率 / 分类 / 难度 / 失败分类定位）、`EvalHarness` 一行接入 | [AGENT_INTELLIGENCE.md](docs/AGENT_INTELLIGENCE.md) |
 | `agent-workflow` | **工作流系统**（PR #25）：参数化声明式工作流（DAG + 条件分支 + 回边循环）、超步调度引擎（节点级重试/超时/失败三态处置/human-in-loop/崩溃恢复/熔断护栏）、工作流库（候选→激活→熔断生命周期 + 执行统计）、会话蒸馏学习（LLM 泛化 + 宏录制回退）、工具五件套 + 建议注入、`WorkflowSystem` 装配门面 | [WORKFLOW_GUIDE.md](docs/WORKFLOW_GUIDE.md) |
 | `examples/simple-agent` | 最小可运行示例：控制台对话 Agent（含插件演示） | [GETTING_STARTED.md](docs/GETTING_STARTED.md) |
 | `examples/terminal-agent` | 终端 Agent 示例：ShellToolSet 全套接入 + 原生 PTY 自动探测 + 控制台审批 | [SHELL_GUIDE.md](docs/SHELL_GUIDE.md) |
@@ -131,7 +133,8 @@ CI 产出的成品库在 Actions → Artifacts 下载。
 - [x] **PR #23** — yl-ai 全量融合收尾 + 全线加固：Termux 环境（agent-shell/termux + termux_exec 工具）、聊天层（agent-chat）、控制 API 自检器、设置存储（SecretVault 首个消费者）、LLM 细节（cachedTokens / normalizeEndpoint / 8 家预设 / 自带工具注入）；**23 项 bug 修复**（issues #8–#21：PTY 回显哨兵锚定、写入通道门控、熔断探测槽泄漏、UTF-8 跨 chunk、审计取旧、策略绕过、RFC 6455 合规等）
 - [x] **PR #24** — 长期记忆系统 + 基础能力补强：新模块 agent-memory（三层记忆：召回注入 / 记忆三件套工具 / 会话抽取 / 压缩捕获 / MemorySystem 门面）、agent-core CompositeContextProvider 组合缝、LongTaskAgent extraContextProviders、审批授权跨会话存续（FileApprovalDecisionStore + TTL，opt-in）
 
-- [ ] **PR #25** — 工作流系统：新模块 agent-workflow（参数化工作流定义 + ${} 模板形参 / 超步 DAG 调度 / Tarjan 回边循环重入 / 节点级退避重试 / 失败三态处置 / human-in-loop / 持久化运行态崩溃恢复 / maxSteps 熔断）、工作流库（CANDIDATE→ACTIVE 晋升 + 连败自动熔断 + 执行统计）、WorkflowExtractor 蒸馏学习（LLM 泛化纪律 + 宏录制零依赖回退）、run/list/read/save/disable 工具五件套 + WorkflowSuggester 两阶段披露注入、examples/workflow-agent 确定性演示
+- [x] **PR #25** — 工作流系统：新模块 agent-workflow（参数化工作流定义 + ${} 模板形参 / 超步 DAG 调度 / Tarjan 回边循环重入 / 节点级退避重试 / 失败三态处置 / human-in-loop / 持久化运行态崩溃恢复 / maxSteps 熔断）、工作流库（CANDIDATE→ACTIVE 晋升 + 连败自动熔断 + 执行统计）、WorkflowExtractor 蒸馏学习（LLM 泛化纪律 + 宏录制零依赖回退）、run/list/read/save/disable 工具五件套 + WorkflowSuggester 两阶段披露注入、examples/workflow-agent 确定性演示
+- [x] **PR #26** — Agent 智能深化：agent-core 反思引擎（失败驱动根因分析 + 启发式回退 + 冷却纪律）、循环护栏升级（语义等价签名 + 交替周期检测）、跑偏检测器（停滞 + LLM 目标对齐抽查）、结构化默认提示；agent-llm ToolCallEmulatingClient（无 function-calling 本地模型的文本协议模拟 + fence 边界流式回持）；agent-core LocalModelProfiles（6 档本地模型预设 + custom 档位生成）；agent-tasks TaskDecomposer（阶段→步骤+验收标准拆解 + 解析容错兜底）+ 父任务状态自动收拢；新模块 agent-eval（轨迹校验 / 移动端 18 任务套件 / 评估 harness / 调优报告）
 
 ## License
 

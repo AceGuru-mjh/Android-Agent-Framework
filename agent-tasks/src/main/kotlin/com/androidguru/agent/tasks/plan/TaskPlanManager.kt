@@ -24,6 +24,12 @@ class TaskPlanManager(
     private val sessionId: String,
     /** 同一时刻只允许一个任务 IN_PROGRESS（新进行中任务自动把旧的回退 PENDING）。 */
     val enforceSingleActive: Boolean = true,
+    /**
+     * 父任务状态自动收拢（PR #26）：子任务全部 DONE/SKIPPED → 父任务 DONE；
+     * 全部终态且 ≥1 FAILED → 父任务 FAILED；子任务开始推进 → 父任务 PENDING →
+     * IN_PROGRESS。永不把父任务从人工置位的终态回退。
+     */
+    val autoAggregateParent: Boolean = true,
 ) {
 
     /** 计划变更操作失败（未知 id / 空标题等）。 */
@@ -306,7 +312,12 @@ class TaskPlanManager(
         listeners.forEach { it(plan) }
     }
 
-    /** 单一活跃纪律 + 父任务状态收拢（子任务全 DONE/FAILED 时父任务自动推进语义不强制，仅排序稳定）。 */
+    /**
+     * 单一活跃纪律 + 父任务状态收拢（子任务全 DONE/SKIPPED 时父任务自动推进）。
+     *
+     * 注：两级结构下父任务的 IN_PROGRESS 是**派生态**（表示「该阶段正在推进」），
+     * 与当前叶子任务并存不算违反单一活跃纪律 —— 单一活跃约束的是实际执行的叶子。
+     */
     private fun normalize(tasks: List<TaskEntry>): List<TaskEntry> {
         val normalized = tasks.toMutableList()
         if (enforceSingleActive) {
@@ -322,7 +333,46 @@ class TaskPlanManager(
                 }
             }
         }
+        if (autoAggregateParent) {
+            aggregateParents(normalized)
+        }
         return normalized
+    }
+
+    /**
+     * 父任务状态收拢：只在「向前推进」方向上改写父任务，永不回退人工置位的终态。
+     *
+     * - 子任务全 DONE/SKIPPED → 父任务 DONE（含部分 SKIPPED：跳过不算失败）；
+     * - 子任务全终态且 ≥1 FAILED → 父任务 FAILED；
+     * - 父任务 PENDING 且有子任务开始推进（IN_PROGRESS/DONE）→ 父任务 IN_PROGRESS。
+     */
+    private fun aggregateParents(tasks: MutableList<TaskEntry>) {
+        val childrenByParent = tasks.filter { it.parent != null }.groupBy { it.parent!! }
+        for (i in tasks.indices) {
+            val task = tasks[i]
+            if (task.parent != null) continue // 只收拢父层级（有子任务的非叶子）
+            val children = childrenByParent[task.id] ?: continue
+
+            val aggregated = when {
+                task.status == TaskStatus.DONE || task.status == TaskStatus.SKIPPED -> null // 不回退人工终态
+
+                children.all { it.status == TaskStatus.DONE || it.status == TaskStatus.SKIPPED } ->
+                    TaskStatus.DONE
+
+                children.none { it.status == TaskStatus.PENDING || it.status == TaskStatus.IN_PROGRESS } &&
+                    children.any { it.status == TaskStatus.FAILED } ->
+                    TaskStatus.FAILED
+
+                task.status == TaskStatus.PENDING &&
+                    children.any { it.status == TaskStatus.IN_PROGRESS || it.status == TaskStatus.DONE || it.status == TaskStatus.FAILED } ->
+                    TaskStatus.IN_PROGRESS
+
+                else -> null
+            }
+            if (aggregated != null && aggregated != task.status) {
+                tasks[i] = task.copy(status = aggregated)
+            }
+        }
     }
 
     private fun nextId(seq: Int, allocated: LinkedHashMap<String, TaskEntry>): String {

@@ -84,6 +84,31 @@ sealed interface AgentEvent {
         val arguments: String,
     ) : AgentEvent
 
+    // ---- 反思纠错（Reflexion） ----
+
+    /**
+     * 反思触发：连续失败 / 循环护栏命中后，引擎执行了一次根因分析，
+     * [lesson] 为注入给模型的策略修正（byLlm=false 表示 LLM 不可用，
+     * 走了确定性启发式回退）。
+     */
+    data class ReflectionTriggered(
+        val triggerReason: String,
+        val lesson: String,
+        val byLlm: Boolean,
+    ) : AgentEvent
+
+    // ---- 跑偏检测 ----
+
+    /**
+     * 跑偏疑似：连续多轮无进展信号（停滞），或 LLM 目标对齐抽查判未对齐。
+     * [advisory] 为注入给模型的拉回建议文本。
+     */
+    data class DriftSuspected(
+        val stagnationIterations: Int,
+        val reason: String,
+        val advisory: String,
+    ) : AgentEvent
+
     // ---- 终态 ----
 
     data class Error(val message: String, val recoverable: Boolean) : AgentEvent

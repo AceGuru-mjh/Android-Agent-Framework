@@ -66,6 +66,28 @@ data class AgentConfig(
 
     /** 签名统计窗口大小（只统计最近 N 次调用）。 */
     val loopDetectionWindow: Int = 12,
+
+    // ---- 反思纠错（Reflexion） ----
+
+    /** 是否启用失败驱动的反思（连续失败 → LLM 根因分析 → 策略修正注入）。 */
+    val reflectionEnabled: Boolean = true,
+
+    /** 触发反思的连续失败次数阈值。 */
+    val reflectionFailureThreshold: Int = 3,
+
+    /** 反思调用（独立轻量 LLM 调用）的最大输出 token。 */
+    val reflectionMaxTokens: Int = 300,
+
+    // ---- 跑偏检测 ----
+
+    /** 是否启用进展停滞 + 目标对齐检测（多步骤复杂任务防发散）。 */
+    val driftDetectionEnabled: Boolean = true,
+
+    /** 连续 N 轮无任何进展信号时判定疑似停滞，注入拉回建议。 */
+    val driftStagnationIterations: Int = 4,
+
+    /** 每隔 N 轮迭代做一次 LLM 目标对齐抽查（0 = 关闭）。 */
+    val driftCheckInterval: Int = 8,
 ) {
     /** 读-改-写：保留未触及字段的局部更新。 */
     fun patch(block: (AgentConfig) -> AgentConfig): AgentConfig = block(this)
